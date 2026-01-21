@@ -1,0 +1,21 @@
+# Server
+HOST=ip
+PORT=port
+DEBUG=false
+
+# Database
+DATABASE_URL=database
+
+# LLM
+LLM_API_KEY="api-key"
+LLM_BASE_URL="llm-url"
+LLM_MODEL="llm-model"
+LLM_PROVIDER="llm-provider"  # claude 或 zhipu
+
+# TTS
+TTS_VOICE=tts-voice
+
+# Paths
+UPLOAD_DIR=./static/uploads
+AUDIO_DIR=./static/audio
+STATIC_DIR=./static
