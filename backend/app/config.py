@@ -1,5 +1,4 @@
 """配置管理模块"""
-from functools import lru_cache
 from pathlib import Path
 import os
 from dotenv import load_dotenv
@@ -18,7 +17,7 @@ class Settings:
     debug: bool = os.getenv("DEBUG", "false").lower() == "true"
 
     # Database
-    database_url: str = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./data/app.db")
+    database_url: str = os.getenv("DATABASE_URL", "sqlite:///./data/app.db")
 
     # LLM
     llm_api_key: str = os.getenv("LLM_API_KEY", "")
@@ -27,7 +26,9 @@ class Settings:
     llm_provider: str = os.getenv("LLM_PROVIDER", "claude")  # claude 或 zhipu
 
     # TTS
+    tts_engine: str = os.getenv("TTS_ENGINE", "edge")  # edge 或 offline
     tts_voice: str = os.getenv("TTS_VOICE", "zh-CN-XiaoxiaoNeural")
+    tts_proxy: str = os.getenv("TTS_PROXY", "")  # Edge TTS 代理
 
     # Paths - 转为绝对路径
     @property
@@ -43,9 +44,8 @@ class Settings:
         return Path(__file__).parent.parent / os.getenv("STATIC_DIR", "static")
 
 
-@lru_cache()
 def get_settings() -> Settings:
-    """获取应用配置（单例模式）"""
+    """获取应用配置"""
     return Settings()
 
 

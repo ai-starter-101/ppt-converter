@@ -1,22 +1,18 @@
 """PPT解析服务"""
 from pathlib import Path
+from typing import List, Dict, Any
 from pptx import Presentation
 
 
-def extract_text_from_ppt(file_path: str) -> str:
+def extract_text_from_ppt(file_path: str) -> List[Dict[str, Any]]:
     """
-    从 .pptx 文件中提取所有文本内容
+    从 .pptx 文件中提取每页的文本内容
 
     Args:
         file_path: PPT 文件路径
 
     Returns:
-        格式化的文本字符串，每页幻灯片用分隔符区分
-
-    Raises:
-        FileNotFoundError: 文件不存在
-        InvalidPathError: 路径无效
-        Exception: 其他解析错误
+        每页文本内容的列表，每项包含 page_num 和 content
     """
     path = Path(file_path)
 
@@ -27,28 +23,54 @@ def extract_text_from_ppt(file_path: str) -> str:
         raise ValueError("只支持 .pptx 格式的 PowerPoint 文件")
 
     prs = Presentation(file_path)
-    slides_content = []
+    slides = []
 
     for idx, slide in enumerate(prs.slides, start=1):
         slide_text = []
-        slide_text.append(f"=== 幻灯片 {idx} ===")
+        slide_images = []
 
         for shape in slide.shapes:
+            # 提取文本框内容
             if hasattr(shape, "text_frame") and shape.text_frame:
                 for paragraph in shape.text_frame.paragraphs:
                     text = paragraph.text.strip()
                     if text:
                         slide_text.append(text)
 
-        if len(slide_text) > 1:  # 只有标题
-            slides_content.append("\n".join(slide_text))
-        else:
-            slides_content.append(f"=== 幻灯片 {idx} ===\n[无文本内容]")
+            # 检查是否有图片
+            if hasattr(shape, "shape_type"):
+                # 检查是否是图片类型
+                if shape.shape_type == 13:  # MSO_SHAPE_TYPE.PICTURE
+                    if hasattr(shape, "name"):
+                        slide_images.append(shape.name)
 
-    return "\n\n".join(slides_content)
+        slides.append({
+            "page_num": idx,
+            "content": "\n".join(slide_text) if slide_text else "[无文本内容]",
+            "image_count": len(slide_images)
+        })
+
+    return slides
 
 
-def get_ppt_info(file_path: str) -> dict:
+def extract_all_text_from_ppt(file_path: str) -> str:
+    """
+    提取所有文本内容（兼容旧接口）
+
+    Args:
+        file_path: PPT 文件路径
+
+    Returns:
+        格式化的文本字符串，每页幻灯片用分隔符区分
+    """
+    slides = extract_text_from_ppt(file_path)
+    result = []
+    for slide in slides:
+        result.append(f"=== 第 {slide['page_num']} 页 ===\n{slide['content']}")
+    return "\n\n".join(result)
+
+
+def get_ppt_info(file_path: str) -> Dict[str, Any]:
     """
     获取 PPT 文件的基本信息
 
@@ -69,4 +91,5 @@ def get_ppt_info(file_path: str) -> dict:
         "filename": path.name,
         "slide_count": len(prs.slides),
         "file_size": path.stat().st_size,
+        "slides": extract_text_from_ppt(file_path)
     }

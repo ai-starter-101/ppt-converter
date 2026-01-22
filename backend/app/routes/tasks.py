@@ -1,12 +1,20 @@
 """任务相关 API 路由"""
 import uuid
+import json
 from pathlib import Path
 from typing import List, Optional
-from fastapi import APIRouter, HTTPException, UploadFile, File, Depends
+from fastapi import APIRouter, HTTPException, UploadFile, File, Depends, Query
 from sqlmodel import Session, select
 from app.database import get_session
-from app.models import Task
-from app.services import extract_text_from_ppt, get_ppt_info, generate_script, generate_audio, get_audio_duration
+from app.models import Task, slides_to_json, parse_slides_json
+from app.services import (
+    extract_text_from_ppt,
+    get_ppt_info,
+    generate_script_per_page,
+    generate_audio,
+    generate_audio_per_page,
+    get_audio_duration
+)
 from app.config import settings
 import aiofiles
 
@@ -72,9 +80,10 @@ async def upload_ppt(
         content = await file.read()
         await f.write(content)
 
-    # 验证文件
+    # 验证文件并提取幻灯片内容
     try:
         ppt_info = get_ppt_info(str(file_path))
+        slides_content = ppt_info["slides"]
     except Exception as e:
         file_path.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail=f"无效的 PPT 文件: {str(e)}")
@@ -83,123 +92,287 @@ async def upload_ppt(
     task.filename = file.filename
     task.file_path = str(file_path)
     task.status = "uploaded"
+    task.slide_count = ppt_info["slide_count"]
+    task.slides_content = slides_to_json(slides_content)
     session.commit()
 
     return {
         "id": task.id,
         "filename": task.filename,
         "status": task.status,
-        "slide_count": ppt_info["slide_count"]
+        "slide_count": task.slide_count,
+        "slides": slides_content
     }
 
 
-@router.post("/{task_id}/script")
-async def generate_script_endpoint(
-    task_id: str,
-    session: Session = Depends(get_session)
-) -> dict:
-    """生成讲解脚本"""
+@router.get("/{task_id}/slides")
+async def get_slides(task_id: str, session: Session = Depends(get_session)) -> dict:
+    """获取幻灯片内容"""
     task = session.get(Task, task_id)
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
 
-    if task.status != "uploaded":
+    if not task.slides_content:
         raise HTTPException(status_code=400, detail="请先上传 PPT 文件")
 
-    # 提取 PPT 内容
-    try:
-        ppt_content = extract_text_from_ppt(task.file_path)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"解析 PPT 失败: {str(e)}")
+    slides = parse_slides_json(task.slides_content)
+    scripts = parse_slides_json(task.slides_script)
+    audios = parse_slides_json(task.slides_audio)
 
-    # 生成脚本
-    try:
-        script = await generate_script(ppt_content)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"生成脚本失败: {str(e)}")
+    # 合并数据
+    result = []
+    for slide in slides:
+        page_num = slide["page_num"]
+        script = next((s["script"] for s in scripts if s["page_num"] == page_num), "")
+        audio = next((a for a in audios if a["page_num"] == page_num), None)
 
-    # 更新任务
-    task.script = script
+        result.append({
+            "page_num": page_num,
+            "content": slide["content"],
+            "script": script,
+            "audio": audio
+        })
+
+    return {
+        "task_id": task_id,
+        "filename": task.filename,
+        "slides": result
+    }
+
+
+@router.post("/{task_id}/scripts/generate")
+async def generate_scripts(
+    task_id: str,
+    session: Session = Depends(get_session)
+) -> dict:
+    """按页生成所有脚本"""
+    task = session.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    if task.status not in ["uploaded", "script_ready"]:
+        raise HTTPException(status_code=400, detail="请先上传 PPT 文件")
+
+    # 获取幻灯片内容
+    slides = parse_slides_json(task.slides_content)
+    if not slides:
+        raise HTTPException(status_code=400, detail="幻灯片内容为空")
+
+    # 按页生成脚本
+    scripts = await generate_script_per_page(slides)
+
+    # 保存脚本
+    task.slides_script = slides_to_json(scripts)
     task.status = "script_ready"
     session.commit()
 
     return {
-        "id": task.id,
-        "script": task.script,
+        "task_id": task_id,
+        "scripts": scripts,
         "status": task.status
     }
 
 
-@router.put("/{task_id}/script")
+@router.post("/{task_id}/scripts/{page_num}/generate")
+async def generate_single_script(
+    task_id: str,
+    page_num: int,
+    session: Session = Depends(get_session)
+) -> dict:
+    """生成单页脚本"""
+    task = session.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    if task.status not in ["uploaded", "script_ready"]:
+        raise HTTPException(status_code=400, detail="请先上传 PPT 文件")
+
+    # 获取幻灯片内容
+    slides = parse_slides_json(task.slides_content)
+    slide = next((s for s in slides if s["page_num"] == page_num), None)
+
+    if not slide:
+        raise HTTPException(status_code=404, detail="幻灯片不存在")
+
+    # 生成单页脚本
+    scripts = await generate_script_per_page([slide])
+    script = scripts[0] if scripts else {"page_num": page_num, "script": ""}
+
+    # 保存脚本
+    all_scripts = parse_slides_json(task.slides_script)
+    updated = False
+    for s in all_scripts:
+        if s["page_num"] == page_num:
+            s["script"] = script["script"]
+            updated = True
+            break
+
+    if not updated:
+        all_scripts.append({"page_num": page_num, "script": script["script"]})
+
+    task.slides_script = slides_to_json(all_scripts)
+    task.status = "script_ready"
+    session.commit()
+
+    return {
+        "task_id": task_id,
+        "page_num": page_num,
+        "script": script["script"],
+        "status": task.status
+    }
+
+
+@router.put("/{task_id}/scripts/{page_num}")
 async def update_script(
     task_id: str,
+    page_num: int,
     script_data: dict,
     session: Session = Depends(get_session)
 ) -> dict:
-    """更新脚本内容"""
+    """更新单页脚本"""
     task = session.get(Task, task_id)
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
 
-    task.script = script_data.get("script", "")
+    scripts = parse_slides_json(task.slides_script)
+
+    # 更新或添加脚本
+    updated = False
+    for s in scripts:
+        if s["page_num"] == page_num:
+            s["script"] = script_data.get("script", "")
+            updated = True
+            break
+
+    if not updated:
+        scripts.append({
+            "page_num": page_num,
+            "script": script_data.get("script", "")
+        })
+
+    task.slides_script = slides_to_json(scripts)
+    task.status = "script_ready"
     session.commit()
 
-    return {"id": task.id, "script": task.script, "status": task.status}
+    return {
+        "task_id": task_id,
+        "page_num": page_num,
+        "script": script_data.get("script", ""),
+        "status": task.status
+    }
 
 
-@router.post("/{task_id}/audio")
-async def generate_audio_endpoint(
+@router.post("/{task_id}/audio/{page_num}")
+async def generate_audio_page(
     task_id: str,
+    page_num: int,
     session: Session = Depends(get_session)
 ) -> dict:
-    """生成音频"""
+    """生成单页音频"""
     task = session.get(Task, task_id)
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
 
-    if task.status != "script_ready":
-        raise HTTPException(status_code=400, detail="请先生成或编辑脚本")
+    if task.status not in ["uploaded", "script_ready"]:
+        raise HTTPException(status_code=400, detail="请先生成脚本")
 
-    if not task.script:
-        raise HTTPException(status_code=400, detail="脚本内容为空")
+    # 获取脚本
+    scripts = parse_slides_json(task.slides_script)
+    script = next((s["script"] for s in scripts if s["page_num"] == page_num), "")
 
-    # 生成音频文件
-    audio_filename = f"{task_id}.mp3"
-    audio_path = settings.audio_dir / audio_filename
-    settings.audio_dir.mkdir(parents=True, exist_ok=True)
+    if not script:
+        raise HTTPException(status_code=400, detail=f"第 {page_num} 页脚本为空")
+
+    # 生成音频
+    audio_dir = settings.audio_dir / task_id
+    audio_path = audio_dir / f"page_{page_num}.mp3"
 
     try:
-        duration = await generate_audio(task.script, str(audio_path))
+        duration = await generate_audio(script, str(audio_path))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"生成音频失败: {str(e)}")
 
-    # 更新任务
-    task.audio_path = str(audio_path)
-    task.audio_duration = duration
+    # 更新音频信息
+    audios = parse_slides_json(task.slides_audio)
+    updated = False
+    for a in audios:
+        if a["page_num"] == page_num:
+            a["audio_path"] = str(audio_path)
+            a["duration"] = duration
+            updated = True
+            break
+
+    if not updated:
+        audios.append({
+            "page_num": page_num,
+            "audio_path": str(audio_path),
+            "duration": duration
+        })
+
+    task.slides_audio = slides_to_json(audios)
     task.status = "audio_ready"
     session.commit()
 
     return {
-        "id": task.id,
-        "audio_path": f"/static/audio/{audio_filename}",
-        "audio_duration": duration,
+        "task_id": task_id,
+        "page_num": page_num,
+        "audio_path": f"/static/audio/{task_id}/page_{page_num}.mp3",
+        "duration": duration,
         "status": task.status
     }
 
 
-@router.get("/{task_id}/audio")
-async def get_audio(task_id: str, session: Session = Depends(get_session)):
-    """获取音频文件流"""
+@router.get("/{task_id}/audio/{page_num}")
+async def get_audio_page(task_id: str, page_num: int, session: Session = Depends(get_session)):
+    """获取单页音频文件流"""
     task = session.get(Task, task_id)
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
 
-    if not task.audio_path or not Path(task.audio_path).exists():
+    audio_path = settings.audio_dir / task_id / f"page_{page_num}.mp3"
+
+    if not audio_path.exists():
         raise HTTPException(status_code=404, detail="音频文件不存在")
 
     from fastapi.responses import FileResponse
     return FileResponse(
-        path=task.audio_path,
+        path=str(audio_path),
         media_type="audio/mpeg",
-        filename=f"{task_id}.mp3"
+        filename=f"{task_id}_page_{page_num}.mp3"
     )
+
+
+@router.post("/{task_id}/audio/generate-all")
+async def generate_all_audio(
+    task_id: str,
+    session: Session = Depends(get_session)
+) -> dict:
+    """生成所有页面的音频"""
+    task = session.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    if task.status not in ["uploaded", "script_ready"]:
+        raise HTTPException(status_code=400, detail="请先生成脚本")
+
+    scripts = parse_slides_json(task.slides_script)
+
+    # 过滤有脚本的页面
+    valid_scripts = [s for s in scripts if s.get("script", "").strip()]
+
+    if not valid_scripts:
+        raise HTTPException(status_code=400, detail="没有可生成音频的脚本")
+
+    # 按页生成音频
+    audio_dir = settings.audio_dir / task_id
+    audio_results = await generate_audio_per_page(valid_scripts, str(audio_dir))
+
+    task.slides_audio = slides_to_json(audio_results)
+    task.status = "audio_ready"
+    session.commit()
+
+    return {
+        "task_id": task_id,
+        "audios": audio_results,
+        "status": task.status
+    }
