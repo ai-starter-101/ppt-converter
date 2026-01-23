@@ -26,9 +26,19 @@ class Settings:
     llm_provider: str = os.getenv("LLM_PROVIDER", "claude")  # claude 或 zhipu
 
     # TTS
-    tts_engine: str = os.getenv("TTS_ENGINE", "edge")  # edge 或 offline
+    tts_engine: str = os.getenv("TTS_ENGINE", "edge")  # edge, offline, xfyun, doubao
     tts_voice: str = os.getenv("TTS_VOICE", "zh-CN-XiaoxiaoNeural")
     tts_proxy: str = os.getenv("TTS_PROXY", "")  # Edge TTS 代理
+
+    # 讯飞 TTS 配置
+    xfyun_app_id: str = os.getenv("XFYUN_APP_ID", "")
+    xfyun_api_key: str = os.getenv("XFYUN_API_KEY", "")
+    xfyun_api_secret: str = os.getenv("XFYUN_API_SECRET", "")
+
+    # 豆包 TTS 配置 (火山引擎)
+    doubao_app_id: str = os.getenv("DOUBAO_APP_ID", "")
+    doubao_access_token: str = os.getenv("DOUBAO_ACCESS_TOKEN", "")
+    doubao_cluster: str = os.getenv("DOUBAO_CLUSTER", "volcano_tts")
 
     # Paths - 转为绝对路径
     @property

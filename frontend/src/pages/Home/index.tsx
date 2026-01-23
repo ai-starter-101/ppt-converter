@@ -2,9 +2,9 @@
 import { useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Card, Button, List, Tag, Typography, Empty, Space, message } from 'antd';
-import { PlusOutlined, FileTextOutlined, ClockCircleOutlined } from '@ant-design/icons';
-import { getTaskList, createTask } from '../../api/task';
+import { Card, Button, List, Tag, Typography, Empty, Space, message, Modal } from 'antd';
+import { PlusOutlined, FileTextOutlined, ClockCircleOutlined, DeleteOutlined } from '@ant-design/icons';
+import { getTaskList, createTask, deleteTask } from '../../api/task';
 import type { Task, TaskStatus } from '../../types';
 import { useTaskStore } from '../../store/useTaskStore';
 
@@ -69,6 +69,31 @@ export const HomePage = () => {
     navigate(`/task/${taskId}`);
   };
 
+  // 删除任务 mutation
+  const deleteMutation = useMutation({
+    mutationFn: deleteTask,
+    onSuccess: () => {
+      message.success('任务已删除');
+      queryClient.invalidateQueries({ queryKey: ['tasks'] });
+    },
+    onError: (error: Error) => {
+      message.error(error.message || '删除失败');
+    },
+  });
+
+  const handleDeleteTask = (taskId: string, filename: string) => {
+    Modal.confirm({
+      title: '确认删除',
+      content: `确定要删除任务 "${filename}" 吗？此操作不可恢复。`,
+      okText: '删除',
+      okType: 'danger',
+      cancelText: '取消',
+      onOk: () => {
+        deleteMutation.mutate(taskId);
+      },
+    });
+  };
+
   return (
     <div style={{ padding: '24px', maxWidth: 1200, margin: '0 auto' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px' }}>
@@ -105,6 +130,15 @@ export const HomePage = () => {
                   actions={[
                     <Button type="link" onClick={() => handleOpenTask(task.id)}>
                       打开
+                    </Button>,
+                    <Button
+                      type="link"
+                      danger
+                      icon={<DeleteOutlined />}
+                      onClick={() => handleDeleteTask(task.id, task.filename || '未命名任务')}
+                      loading={deleteMutation.isPending}
+                    >
+                      删除
                     </Button>,
                   ]}
                 >

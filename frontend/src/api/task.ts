@@ -73,5 +73,10 @@ export const generateAllAudio = async (id: string): Promise<{ task_id: string; a
 // 获取单页音频 URL
 export const getAudioUrl = (id: string, pageNum: number): string => {
   const baseURL = apiClient.defaults.baseURL?.replace('/api', '') || 'http://localhost:8000';
-  return `${baseURL}/tasks/${id}/audio/${pageNum}`;
+  return `${baseURL}/api/tasks/${id}/audio/${pageNum}`;
+};
+
+// 删除任务
+export const deleteTask = async (id: string): Promise<{ message: string; task_id: string }> => {
+  return apiClient.delete(`/tasks/${id}`);
 };

@@ -13,12 +13,27 @@ from app.services import (
     generate_script_per_page,
     generate_audio,
     generate_audio_per_page,
-    get_audio_duration
+    get_audio_duration,
+    generate_slide_screenshots_async
 )
 from app.config import settings
 import aiofiles
 
 router = APIRouter(prefix="/api/tasks", tags=["任务管理"])
+
+
+# 添加 OPTIONS 路由处理音频的 CORS 预检请求
+@router.options("/{task_id}/audio/{page_num}")
+async def audio_options():
+    """处理音频请求的 CORS 预检"""
+    from fastapi.responses import Response
+    return Response(
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+        }
+    )
 
 
 @router.post("")
@@ -50,6 +65,42 @@ async def get_task(task_id: str, session: Session = Depends(get_session)) -> dic
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
     return task.model_dump()
+
+
+@router.delete("/{task_id}")
+async def delete_task(task_id: str, session: Session = Depends(get_session)) -> dict:
+    """删除任务"""
+    task = session.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    # 删除关联的文件
+    try:
+        # 删除 PPT 文件
+        if task.file_path and Path(task.file_path).exists():
+            Path(task.file_path).unlink()
+
+        # 删除截图目录
+        screenshot_dir = settings.static_dir / "screenshots" / task_id
+        if screenshot_dir.exists():
+            import shutil
+            shutil.rmtree(screenshot_dir)
+
+        # 删除音频目录
+        audio_dir = settings.audio_dir / task_id
+        if audio_dir.exists():
+            import shutil
+            shutil.rmtree(audio_dir)
+
+    except Exception as e:
+        # 文件删除失败不影响任务删除
+        print(f"警告: 删除文件失败: {e}")
+
+    # 删除数据库记录
+    session.delete(task)
+    session.commit()
+
+    return {"message": "任务已删除", "task_id": task_id}
 
 
 @router.post("/{task_id}/upload")
@@ -88,12 +139,21 @@ async def upload_ppt(
         file_path.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail=f"无效的 PPT 文件: {str(e)}")
 
+    # 生成幻灯片截图
+    try:
+        screenshots = await generate_slide_screenshots_async(str(file_path), task_id)
+    except Exception as e:
+        # 截图生成失败不影响主流程，只记录警告
+        print(f"警告: 生成截图失败: {e}")
+        screenshots = []
+
     # 更新任务
     task.filename = file.filename
     task.file_path = str(file_path)
     task.status = "uploaded"
     task.slide_count = ppt_info["slide_count"]
     task.slides_content = slides_to_json(slides_content)
+    task.slides_screenshots = slides_to_json(screenshots)
     session.commit()
 
     return {
@@ -101,7 +161,8 @@ async def upload_ppt(
         "filename": task.filename,
         "status": task.status,
         "slide_count": task.slide_count,
-        "slides": slides_content
+        "slides": slides_content,
+        "screenshots": screenshots
     }
 
 
@@ -118,6 +179,10 @@ async def get_slides(task_id: str, session: Session = Depends(get_session)) -> d
     slides = parse_slides_json(task.slides_content)
     scripts = parse_slides_json(task.slides_script)
     audios = parse_slides_json(task.slides_audio)
+    screenshots = parse_slides_json(task.slides_screenshots)
+
+    # 创建截图查找字典
+    screenshots_dict = {s["page_num"]: s["screenshot_path"] for s in screenshots}
 
     # 合并数据
     result = []
@@ -130,7 +195,8 @@ async def get_slides(task_id: str, session: Session = Depends(get_session)) -> d
             "page_num": page_num,
             "content": slide["content"],
             "script": script,
-            "audio": audio
+            "audio": audio,
+            "screenshot": screenshots_dict.get(page_num)
         })
 
     return {
@@ -335,11 +401,14 @@ async def get_audio_page(task_id: str, page_num: int, session: Session = Depends
         raise HTTPException(status_code=404, detail="音频文件不存在")
 
     from fastapi.responses import FileResponse
-    return FileResponse(
+    response = FileResponse(
         path=str(audio_path),
         media_type="audio/mpeg",
         filename=f"{task_id}_page_{page_num}.mp3"
     )
+    # 添加 CORS 头，允许跨域访问
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    return response
 
 
 @router.post("/{task_id}/audio/generate-all")

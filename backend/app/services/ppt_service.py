@@ -1,7 +1,10 @@
 """PPT解析服务"""
+import subprocess
+import asyncio
 from pathlib import Path
 from typing import List, Dict, Any
 from pptx import Presentation
+from app.config import settings
 
 
 def extract_text_from_ppt(file_path: str) -> List[Dict[str, Any]]:
@@ -93,3 +96,93 @@ def get_ppt_info(file_path: str) -> Dict[str, Any]:
         "file_size": path.stat().st_size,
         "slides": extract_text_from_ppt(file_path)
     }
+
+
+def generate_slide_screenshots(ppt_path: str, task_id: str) -> List[Dict[str, Any]]:
+    """
+    使用 LibreOffice 将 PPT 转换为图片截图
+
+    Args:
+        ppt_path: PPT 文件路径
+        task_id: 任务 ID（用于生成截图文件夹名）
+
+    Returns:
+        包含每页截图路径的列表
+    """
+    path = Path(ppt_path)
+    if not path.exists():
+        raise FileNotFoundError(f"文件不存在: {ppt_path}")
+
+    # 确保截图目录存在
+    screenshot_dir = settings.static_dir / "screenshots" / task_id
+    screenshot_dir.mkdir(parents=True, exist_ok=True)
+
+    # 使用 LibreOffice 将 PPT 转换为 PDF，然后再转为图片
+    # 先转换为 PDF
+    pdf_path = screenshot_dir / f"{path.stem}.pdf"
+
+    # LibreOffice 命令
+    cmd = [
+        "soffice",
+        "--headless",
+        "--convert-to", "pdf",
+        "--outdir", str(screenshot_dir),
+        str(ppt_path)
+    ]
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if result.returncode != 0:
+            raise RuntimeError(f"LibreOffice 转换失败: {result.stderr}")
+
+        # 如果 PDF 不存在，检查是否有其他问题
+        if not pdf_path.exists():
+            raise RuntimeError(f"PDF 文件未生成: {pdf_path}")
+
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("LibreOffice 转换超时")
+
+    # 使用 pdftoppm 将 PDF 转为图片
+    images = []
+    if pdf_path.exists():
+        try:
+            # pdftoppm -png input.pdf output_prefix
+            # 不使用 -singlefile，这样会生成所有页面，文件名格式为 prefix-1.png, prefix-2.png 等
+            result = subprocess.run(
+                ["pdftoppm", "-png", str(pdf_path), str(screenshot_dir / path.stem)],
+                capture_output=True,
+                timeout=120
+            )
+
+            if result.returncode == 0:
+                # 查找生成的图片文件
+                for png_file in sorted(screenshot_dir.glob(f"{path.stem}-*.png")):
+                    rel_path = f"/static/screenshots/{task_id}/{png_file.name}"
+                    # 从文件名提取页码 (filename-1.png)
+                    page_num = int(png_file.stem.split('-')[-1])
+                    images.append({
+                        "page_num": page_num,
+                        "screenshot_path": rel_path
+                    })
+            else:
+                raise RuntimeError(f"pdftoppm 失败: {result.stderr.decode()}")
+
+        except FileNotFoundError:
+            raise RuntimeError("未找到 pdftoppm，请安装 poppler-utils")
+
+    # 清理临时 PDF 文件
+    if pdf_path.exists():
+        pdf_path.unlink()
+
+    return images
+
+
+async def generate_slide_screenshots_async(ppt_path: str, task_id: str) -> List[Dict[str, Any]]:
+    """
+    异步生成幻灯片截图
+    """
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        None,
+        lambda: generate_slide_screenshots(ppt_path, task_id)
+    )

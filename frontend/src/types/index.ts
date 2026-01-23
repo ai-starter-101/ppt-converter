@@ -13,6 +13,7 @@ export interface SlideData {
   content: string;       // PPT 文本内容
   script?: string;       // 讲解脚本
   audio?: AudioInfo;     // 音频信息
+  screenshot?: string;   // 幻灯片截图路径
 }
 
 // 音频信息
@@ -59,6 +60,7 @@ export interface UploadResponse {
   status: TaskStatus;
   slide_count: number;
   slides: SlideData[];
+  screenshots?: { page_num: number; screenshot_path: string }[];
 }
 
 export interface ScriptResponse {

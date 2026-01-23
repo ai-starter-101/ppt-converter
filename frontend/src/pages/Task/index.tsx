@@ -333,6 +333,20 @@ const SlideCard = ({ taskId, slide, onUpdate }: { taskId: string; slide: SlideDa
 
   return (
     <div>
+      {/* 幻灯片截图 */}
+      {slide.screenshot ? (
+        <div style={{ marginBottom: 16 }}>
+          <Text strong>幻灯片预览：</Text>
+          <div style={{ marginTop: 8 }}>
+            <img
+              src={slide.screenshot}
+              alt={`第 ${slide.page_num} 页`}
+              style={{ maxWidth: '100%', maxHeight: 300, border: '1px solid #d9d9d9', borderRadius: 4 }}
+            />
+          </div>
+        </div>
+      ) : null}
+
       <div style={{ marginBottom: 16 }}>
         <Text strong>幻灯片内容：</Text>
         <Paragraph

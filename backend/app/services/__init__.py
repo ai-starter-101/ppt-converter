@@ -2,7 +2,8 @@
 from app.services.ppt_service import (
     extract_text_from_ppt,
     extract_all_text_from_ppt,
-    get_ppt_info
+    get_ppt_info,
+    generate_slide_screenshots_async
 )
 from app.services.script_service import (
     generate_script,
@@ -18,6 +19,7 @@ __all__ = [
     "extract_text_from_ppt",
     "extract_all_text_from_ppt",
     "get_ppt_info",
+    "generate_slide_screenshots_async",
     "generate_script",
     "generate_script_per_page",
     "generate_audio",

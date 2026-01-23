@@ -32,6 +32,9 @@ class Task(SQLModel, table=True):
     # 每页音频路径: [{"page_num": 1, "audio_path": "xxx", "duration": 10.5}, ...]
     slides_audio: Optional[str] = Field(default=None, description="每页音频信息(JSON)")
 
+    # 每页截图路径: [{"page_num": 1, "screenshot_path": "/static/screenshots/xxx/page_1.png"}, ...]
+    slides_screenshots: Optional[str] = Field(default=None, description="每页截图信息(JSON)")
+
     # 合并后的完整音频
     audio_path: Optional[str] = Field(default=None, max_length=500, description="完整音频文件路径")
     audio_duration: Optional[float] = Field(default=None, description="完整音频时长(秒)")
