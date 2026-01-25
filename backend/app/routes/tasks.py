@@ -22,7 +22,20 @@ import aiofiles
 router = APIRouter(prefix="/api/tasks", tags=["任务管理"])
 
 
-# 添加 OPTIONS 路由处理音频的 CORS 预检请求
+# 添加 OPTIONS 路由处理 CORS 预检请求
+@router.options("")
+async def tasks_options():
+    """处理任务相关请求的 CORS 预检"""
+    from fastapi.responses import Response
+    return Response(
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+        }
+    )
+
+
 @router.options("/{task_id}/audio/{page_num}")
 async def audio_options():
     """处理音频请求的 CORS 预检"""
@@ -188,7 +201,9 @@ async def get_slides(task_id: str, session: Session = Depends(get_session)) -> d
     result = []
     for slide in slides:
         page_num = slide["page_num"]
-        script = next((s["script"] for s in scripts if s["page_num"] == page_num), "")
+        # 如果没有生成脚本，使用 PPT 内容作为默认脚本
+        generated_script = next((s["script"] for s in scripts if s["page_num"] == page_num), "")
+        script = generated_script if generated_script else slide["content"]
         audio = next((a for a in audios if a["page_num"] == page_num), None)
 
         result.append({
@@ -445,3 +460,159 @@ async def generate_all_audio(
         "audios": audio_results,
         "status": task.status
     }
+
+
+@router.post("/{task_id}/screenshots/upload")
+async def upload_screenshots(
+    task_id: str,
+    files: List[UploadFile] = File(...),
+    session: Session = Depends(get_session)
+) -> dict:
+    """
+    上传幻灯片截图
+
+    支持多种文件名格式：
+    - page_1.png, page_2.png
+    - 幻灯片1.jpeg, 幻灯片2.png
+    - slide_1.png
+    """
+    task = session.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    # 确保截图目录存在
+    screenshot_dir = settings.static_dir / "screenshots" / task_id
+    screenshot_dir.mkdir(parents=True, exist_ok=True)
+
+    uploaded = []
+
+    for file in files:
+        if not file.filename:
+            continue
+
+        filename = file.filename
+        page_num = None
+
+        # 尝试多种格式解析页码
+        # 格式1: page_1.png, page_2.png
+        if filename.startswith("page_"):
+            try:
+                page_num = int(filename.split('_')[1].split('.')[0])
+            except (IndexError, ValueError):
+                pass
+
+        # 格式2: 幻灯片1.jpeg, 幻灯片2.png
+        if page_num is None:
+            import re
+            match = re.search(r'幻灯片(\d+)', filename)
+            if match:
+                page_num = int(match.group(1))
+
+        # 格式3: slide_1.png
+        if page_num is None:
+            match = re.search(r'slide_?(\d+)', filename, re.IGNORECASE)
+            if match:
+                page_num = int(match.group(1))
+
+        if page_num is None:
+            continue
+
+        # 保存文件
+        file_ext = Path(filename).suffix.lower()
+        if not file_ext or file_ext not in ['.png', '.jpg', '.jpeg', '.gif']:
+            file_ext = '.png'  # 默认使用 png
+
+        save_name = f"page_{page_num}{file_ext}"
+        file_path = screenshot_dir / save_name
+
+        async with aiofiles.open(file_path, 'wb') as f:
+            content = await file.read()
+            await f.write(content)
+
+        uploaded.append({
+            "page_num": page_num,
+            "screenshot_path": f"/static/screenshots/{task_id}/{save_name}"
+        })
+
+    if not uploaded:
+        raise HTTPException(status_code=400, detail="没有成功上传任何截图")
+
+    # 更新任务中的截图信息
+    existing_screenshots = parse_slides_json(task.slides_screenshots) if task.slides_screenshots else []
+
+    for new_screenshot in uploaded:
+        updated = False
+        for s in existing_screenshots:
+            if s["page_num"] == new_screenshot["page_num"]:
+                s["screenshot_path"] = new_screenshot["screenshot_path"]
+                updated = True
+                break
+        if not updated:
+            existing_screenshots.append(new_screenshot)
+
+    task.slides_screenshots = slides_to_json(existing_screenshots)
+    session.commit()
+
+    return {
+        "task_id": task_id,
+        "screenshots": uploaded,
+        "status": task.status
+    }
+
+
+@router.post("/{task_id}/video/synthesize")
+async def synthesize_video(
+    task_id: str,
+    session: Session = Depends(get_session)
+) -> dict:
+    """
+    合成视频：将幻灯片截图和音频合成为视频
+
+    优先使用用户上传的截图，如果不存在则使用 LibreOffice 转换 PPT 为图片。
+    """
+    task = session.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    # 检查状态
+    if task.status not in ["audio_ready", "video_ready"]:
+        raise HTTPException(status_code=400, detail="请先完成音频生成")
+
+    # 检查音频文件
+    audio_dir = settings.audio_dir / task_id
+    if not audio_dir.exists():
+        raise HTTPException(status_code=400, detail="音频文件不存在")
+
+    # 检查音频文件数量
+    audio_files = list(audio_dir.glob("page_*.mp3"))
+    if len(audio_files) < task.slide_count:
+        raise HTTPException(status_code=400, detail=f"音频文件不完整，需要 {task.slide_count} 个音频文件")
+
+    # 检查 PPT 文件
+    if not task.file_path or not Path(task.file_path).exists():
+        raise HTTPException(status_code=400, detail="PPT 文件不存在")
+
+    # 获取截图目录（如果用户上传了截图）
+    screenshot_dir = None
+    if task.slides_screenshots:
+        screenshot_dir = str(settings.static_dir / "screenshots" / task_id)
+
+    # 调用视频合成服务
+    try:
+        from app.services import synthesize_video
+        output_path = synthesize_video(task_id, task.file_path, str(audio_dir), screenshot_dir)
+
+        # 保存结果
+        task.video_path = output_path
+        task.status = "video_ready"
+        session.commit()
+
+        return {
+            "task_id": task_id,
+            "video_path": f"/static/video/{task_id}/{Path(output_path).name}",
+            "status": task.status
+        }
+    except ImportError:
+        raise HTTPException(status_code=500, detail="未安装 pywin32，无法使用 PowerPoint 自动化")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"视频合成失败: {str(e)}")

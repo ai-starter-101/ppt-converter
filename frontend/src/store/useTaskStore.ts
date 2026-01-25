@@ -63,14 +63,18 @@ export const useTaskStore = create<TaskState>((set) => ({
 }));
 
 // 根据状态获取步骤索引
+// 步骤 0：上传PPT
+// 步骤 1：脚本生成/音频生成
+// 步骤 2：合成视频
 export const getStepIndex = (status: TaskStatus): number => {
   const statusMap: Record<TaskStatus, number> = {
-    pending: 0,      // 任务刚创建 - 步骤 0：上传PPT
-    uploaded: 1,     // PPT 已上传 - 步骤 1：脚本生成/编辑
-    processing: 1,   // 处理中 - 步骤 1：脚本生成
-    script_ready: 1, // 脚本已生成 - 步骤 1：脚本生成/编辑（支持手动跳转）
-    audio_ready: 2,  // 音频已生成 - 步骤 2：播放
-    failed: 0,       // 失败 - 回到步骤 0
+    pending: 0,        // 任务刚创建 - 步骤 0：上传PPT
+    uploaded: 1,       // PPT 已上传 - 步骤 1：脚本和音频生成
+    processing: 1,     // 处理中 - 步骤 1：脚本和音频生成
+    script_ready: 1,   // 脚本已生成 - 步骤 1：脚本和音频生成
+    audio_ready: 2,    // 音频已生成 - 步骤 2：合成视频
+    video_ready: 2,    // 视频已合成 - 步骤 2：合成视频
+    failed: 0,         // 失败 - 回到步骤 0
   };
   return statusMap[status] ?? 0;
 };

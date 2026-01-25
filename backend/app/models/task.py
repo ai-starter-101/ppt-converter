@@ -39,6 +39,9 @@ class Task(SQLModel, table=True):
     audio_path: Optional[str] = Field(default=None, max_length=500, description="完整音频文件路径")
     audio_duration: Optional[float] = Field(default=None, description="完整音频时长(秒)")
 
+    # 合成后的视频/PPT路径
+    video_path: Optional[str] = Field(default=None, max_length=500, description="合成后的PPT/视频路径")
+
     created_at: datetime = Field(default_factory=datetime.utcnow, description="创建时间")
     updated_at: datetime = Field(default_factory=datetime.utcnow, description="更新时间")
 

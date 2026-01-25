@@ -80,3 +80,19 @@ export const getAudioUrl = (id: string, pageNum: number): string => {
 export const deleteTask = async (id: string): Promise<{ message: string; task_id: string }> => {
   return apiClient.delete(`/tasks/${id}`);
 };
+
+// 合成视频（将音频插入PPT）
+export const synthesizeVideo = async (id: string): Promise<{ task_id: string; video_path: string; status: string }> => {
+  return apiClient.post(`/tasks/${id}/video/synthesize`);
+};
+
+// 上传幻灯片截图
+export const uploadScreenshots = async (id: string, files: File[]): Promise<{ task_id: string; screenshots: { page_num: number; screenshot_path: string }[] }> => {
+  const formData = new FormData();
+  for (const file of files) {
+    formData.append('files', file);
+  }
+  return apiClient.post(`/tasks/${id}/screenshots/upload`, formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  });
+};

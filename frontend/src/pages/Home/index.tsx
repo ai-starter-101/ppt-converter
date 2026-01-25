@@ -1,22 +1,36 @@
 // 首页 - 任务列表
-import { useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Card, Button, List, Tag, Typography, Empty, Space, message, Modal } from 'antd';
-import { PlusOutlined, FileTextOutlined, ClockCircleOutlined, DeleteOutlined } from '@ant-design/icons';
+import { Table, Button, Tag, Typography, Space, message, Modal, Layout, Pagination, Flex, Card } from 'antd';
+import { PlusOutlined, FileTextOutlined, ClockCircleOutlined, DeleteOutlined, FolderOpenOutlined, CheckCircleFilled, SyncOutlined, RightOutlined } from '@ant-design/icons';
 import { getTaskList, createTask, deleteTask } from '../../api/task';
 import type { Task, TaskStatus } from '../../types';
 import { useTaskStore } from '../../store/useTaskStore';
 
+const { Header, Content } = Layout;
 const { Title, Text } = Typography;
 
-const statusConfig: Record<TaskStatus, { color: string; text: string }> = {
-  pending: { color: 'default', text: '待上传' },
-  uploaded: { color: 'processing', text: '已上传' },
-  processing: { color: 'warning', text: '处理中' },
-  script_ready: { color: 'cyan', text: '脚本就绪' },
-  audio_ready: { color: 'success', text: '已完成' },
-  failed: { color: 'error', text: '失败' },
+const statusConfig: Record<TaskStatus, { color: string; text: string; icon: React.ReactNode }> = {
+  pending: { color: 'default', text: '待上传', icon: <FolderOpenOutlined /> },
+  uploaded: { color: 'processing', text: '已上传', icon: <FileTextOutlined /> },
+  processing: { color: 'warning', text: '处理中', icon: <SyncOutlined spin /> },
+  script_ready: { color: 'cyan', text: '脚本就绪', icon: <FileTextOutlined /> },
+  audio_ready: { color: 'success', text: '已完成', icon: <CheckCircleFilled /> },
+  video_ready: { color: 'purple', text: '已合成', icon: <FileTextOutlined /> },
+  failed: { color: 'error', text: '失败', icon: <FileTextOutlined /> },
+};
+
+const getProgress = (status: TaskStatus): number => {
+  switch (status) {
+    case 'pending': return 0;
+    case 'uploaded': return 25;
+    case 'processing': return 50;
+    case 'script_ready': return 75;
+    case 'audio_ready': return 100;
+    case 'failed': return 100;
+    default: return 0;
+  }
 };
 
 const formatDate = (dateStr: string): string => {
@@ -34,6 +48,8 @@ export const HomePage = () => {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { setTasks, tasks } = useTaskStore();
+  const [page, setPage] = useState(1);
+  const pageSize = 10;
 
   // 获取任务列表
   const { data: taskList, isLoading } = useQuery({
@@ -47,6 +63,10 @@ export const HomePage = () => {
       setTasks(taskList);
     }
   }, [taskList, setTasks]);
+
+  // 分页数据
+  const paginatedTasks = tasks.slice((page - 1) * pageSize, page * pageSize);
+  const totalPages = Math.ceil(tasks.length / pageSize);
 
   // 创建任务 mutation
   const createMutation = useMutation({
@@ -63,10 +83,6 @@ export const HomePage = () => {
 
   const handleCreateTask = () => {
     createMutation.mutate();
-  };
-
-  const handleOpenTask = (taskId: string) => {
-    navigate(`/task/${taskId}`);
   };
 
   // 删除任务 mutation
@@ -94,87 +110,224 @@ export const HomePage = () => {
     });
   };
 
-  return (
-    <div style={{ padding: '24px', maxWidth: 1200, margin: '0 auto' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px' }}>
-        <Title level={2} style={{ margin: 0 }}>PPT 讲解生成器</Title>
-        <Button
-          type="primary"
-          icon={<PlusOutlined />}
-          size="large"
-          onClick={handleCreateTask}
-          loading={createMutation.isPending}
-        >
-          新建任务
-        </Button>
-      </div>
-
-      <Card>
-        {tasks.length === 0 && !isLoading ? (
-          <Empty
-            description="暂无任务，点击新建任务开始"
-            image={Empty.PRESENTED_IMAGE_SIMPLE}
+  // 表格列定义
+  const columns = [
+    {
+      title: '文件名',
+      dataIndex: 'filename',
+      key: 'filename',
+      render: (filename: string, record: Task) => (
+        <Space>
+          <div style={{
+            width: 32,
+            height: 32,
+            borderRadius: 6,
+            background: record.status === 'audio_ready' ? '#f6ffed' : '#f5f5f5',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}>
+            <FileTextOutlined style={{ color: record.status === 'audio_ready' ? '#52c41a' : '#666' }} />
+          </div>
+          <span style={{ fontWeight: 500 }}>{filename || '未命名任务'}</span>
+        </Space>
+      ),
+    },
+    {
+      title: '状态',
+      dataIndex: 'status',
+      key: 'status',
+      width: 120,
+      render: (status: TaskStatus) => {
+        const config = statusConfig[status];
+        return (
+          <Tag color={config.color} icon={config.icon}>
+            {config.text}
+          </Tag>
+        );
+      },
+    },
+    {
+      title: '进度',
+      dataIndex: 'progress',
+      key: 'progress',
+      width: 140,
+      render: (_: unknown, record: Task) => {
+        const progress = getProgress(record.status);
+        return (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <div style={{
+              flex: 1,
+              height: 6,
+              background: '#f0f0f0',
+              borderRadius: 3,
+              overflow: 'hidden',
+            }}>
+              <div style={{
+                width: `${progress}%`,
+                height: '100%',
+                background: record.status === 'failed' ? '#ff4d4f' : '#1890ff',
+                borderRadius: 3,
+                transition: 'width 0.3s',
+              }} />
+            </div>
+            <Text type="secondary" style={{ fontSize: 12, width: 32 }}>{progress}%</Text>
+          </div>
+        );
+      },
+    },
+    {
+      title: '创建时间',
+      dataIndex: 'created_at',
+      key: 'created_at',
+      width: 160,
+      render: (created_at: string) => (
+        <Text type="secondary">
+          <ClockCircleOutlined style={{ marginRight: 4 }} />
+          {formatDate(created_at)}
+        </Text>
+      ),
+    },
+    {
+      title: '操作',
+      key: 'action',
+      width: 100,
+      render: (_: unknown, record: Task) => (
+        <Space>
+          <Button
+            type="link"
+            size="small"
+            icon={<RightOutlined />}
+            onClick={() => navigate(`/task/${record.id}`)}
           >
-            <Button type="primary" onClick={handleCreateTask}>
-              新建任务
-            </Button>
-          </Empty>
-        ) : (
-          <List
-            loading={isLoading}
-            dataSource={tasks}
-            renderItem={(task: Task) => {
-              const config = statusConfig[task.status];
-              return (
-                <List.Item
-                  actions={[
-                    <Button type="link" onClick={() => handleOpenTask(task.id)}>
-                      打开
-                    </Button>,
-                    <Button
-                      type="link"
-                      danger
-                      icon={<DeleteOutlined />}
-                      onClick={() => handleDeleteTask(task.id, task.filename || '未命名任务')}
-                      loading={deleteMutation.isPending}
-                    >
-                      删除
-                    </Button>,
-                  ]}
-                >
-                  <List.Item.Meta
-                    avatar={
-                      <div style={{
-                        width: 48,
-                        height: 48,
-                        background: '#f0f0f0',
-                        borderRadius: 8,
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                      }}>
-                        <FileTextOutlined style={{ fontSize: 24, color: '#666' }} />
-                      </div>
-                    }
-                    title={
-                      <Space>
-                        <span>{task.filename}</span>
-                        <Tag color={config.color}>{config.text}</Tag>
-                      </Space>
-                    }
-                    description={
-                      <Space>
-                        <ClockCircleOutlined />
-                        <Text type="secondary">{formatDate(task.created_at)}</Text>
-                      </Space>
-                    }
-                  />
-                </List.Item>
-              );
+            详情
+          </Button>
+          <Button
+            type="link"
+            danger
+            size="small"
+            icon={<DeleteOutlined />}
+            onClick={(e) => {
+              e.stopPropagation();
+              handleDeleteTask(record.id, record.filename || '未命名任务');
             }}
           />
-        )}
-      </Card>
-    </div>
+        </Space>
+      ),
+    },
+  ];
+
+  // 空状态
+  if (tasks.length === 0 && !isLoading) {
+    return (
+      <Layout style={{ minHeight: '100vh', background: '#f0f2f5', width: '100%' }}>
+        <Header style={{
+          background: '#fff',
+          padding: '0 16px',
+          display: 'flex',
+          alignItems: 'center',
+          borderBottom: '1px solid #f0f0f0',
+          width: '100%',
+        }}>
+          <Title level={4} style={{ margin: 0 }}>PPT 讲解生成器</Title>
+        </Header>
+        <Content style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: 'calc(100vh - 64px)' }}>
+          <Card style={{ width: 480, textAlign: 'center', padding: '48px 32px' }}>
+            <div style={{ marginBottom: 24 }}>
+              <div style={{
+                width: 80,
+                height: 80,
+                borderRadius: '50%',
+                background: '#e6f4ff',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                margin: '0 auto',
+              }}>
+                <FileTextOutlined style={{ fontSize: 36, color: '#1890ff' }} />
+              </div>
+            </div>
+            <Title level={4}>PPT 讲解生成器</Title>
+            <Text type="secondary" style={{ display: 'block', marginBottom: 24 }}>
+              将 PowerPoint 转换为带讲解脚本和语音的演示文稿
+            </Text>
+            <Button
+              type="primary"
+              size="large"
+              icon={<PlusOutlined />}
+              onClick={handleCreateTask}
+              loading={createMutation.isPending}
+            >
+              新建任务
+            </Button>
+          </Card>
+        </Content>
+      </Layout>
+    );
+  }
+
+  return (
+    <Layout style={{ minHeight: '100vh', background: '#f0f2f5', width: '100%' }}>
+      <Header style={{
+        background: '#fff',
+        padding: '0 16px',
+        display: 'flex',
+        alignItems: 'center',
+        borderBottom: '1px solid #f0f0f0',
+        width: '100%',
+      }}>
+        <Flex justify="space-between" align="center" style={{ width: '100%' }}>
+          <Title level={4} style={{ margin: 0 }}>PPT 讲解生成器</Title>
+          <Button
+            type="primary"
+            icon={<PlusOutlined />}
+            onClick={handleCreateTask}
+            loading={createMutation.isPending}
+          >
+            新建任务
+          </Button>
+        </Flex>
+      </Header>
+
+      <Content style={{ padding: 0, height: 'calc(100vh - 64px)', overflow: 'auto' }}>
+        <div style={{ width: '100%' }}>
+          {/* 任务表格 */}
+          <Card style={{ marginBottom: 16, width: '100%' }}>
+            <Flex justify="space-between" align="center" style={{ marginBottom: 16 }}>
+              <Title level={5} style={{ margin: 0 }}>任务列表</Title>
+              <Text type="secondary">共 {tasks.length} 个任务</Text>
+            </Flex>
+
+            <Table
+              dataSource={paginatedTasks}
+              columns={columns}
+              rowKey="id"
+              loading={isLoading}
+              pagination={false}
+              size="middle"
+              scroll={{ x: true }}
+              onRow={(record) => ({
+                onClick: () => navigate(`/task/${record.id}`),
+                style: { cursor: 'pointer' },
+              })}
+              style={{ width: '100%' }}
+            />
+
+            {totalPages > 1 && (
+              <Flex justify="center" style={{ marginTop: 16 }}>
+                <Pagination
+                  current={page}
+                  total={tasks.length}
+                  pageSize={pageSize}
+                  onChange={(p) => setPage(p)}
+                  showSizeChanger={false}
+                  showTotal={(total) => `共 ${total} 个任务`}
+                />
+              </Flex>
+            )}
+          </Card>
+        </div>
+      </Content>
+    </Layout>
   );
 };

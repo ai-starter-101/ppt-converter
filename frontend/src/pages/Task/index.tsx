@@ -1,21 +1,44 @@
-// 任务详情页 - 按页展示和编辑
+// 任务详情页 - 走马灯形式展示和编辑
 import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Layout, Button, Typography, Space, Card, Result, Empty, Collapse, message, Tag, Upload, Steps } from 'antd';
-import { ArrowLeftOutlined, SoundOutlined, DownloadOutlined, PlayCircleOutlined, UploadOutlined, FileTextOutlined } from '@ant-design/icons';
-import { getTask, getSlides, generateScripts, updateScript, generateSingleScript, generateAudio, getAudioUrl, uploadPPT } from '../../api/task';
-import type { Task } from '../../types';
+import { Layout, Button, Typography, Space, Card, Result, message, Tag, Steps, Flex, Carousel, Upload } from 'antd';
+import type { CarouselRef } from 'antd/es/carousel';
+import {
+  ArrowLeftOutlined,
+  SoundOutlined,
+  DownloadOutlined,
+  PlayCircleOutlined,
+  FileTextOutlined,
+  SaveOutlined,
+  ReloadOutlined,
+  CheckCircleFilled,
+  LeftOutlined,
+  RightOutlined,
+  VideoCameraOutlined,
+  FileAddOutlined,
+  PictureOutlined,
+  SyncOutlined,
+} from '@ant-design/icons';
+import { getTask, getSlides, generateScripts, updateScript, generateSingleScript, generateAudio, getAudioUrl, uploadPPT, generateAllAudio, synthesizeVideo, uploadScreenshots } from '../../api/task';
 import type { SlideData } from '../../types';
 import { getStepIndex } from '../../store/useTaskStore';
 
 const { Header, Content } = Layout;
-const { Title, Text, Paragraph } = Typography;
+const { Title, Text } = Typography;
+
+// 步骤配置
+const steps = [
+  { title: '上传PPT', icon: <FileTextOutlined /> },
+  { title: '脚本/音频', icon: <SoundOutlined /> },
+  { title: '合成视频', icon: <VideoCameraOutlined /> },
+];
 
 export const TaskPage = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const carouselRef = useRef<CarouselRef>(null);
 
   // 刷新幻灯片数据
   const refreshSlides = () => {
@@ -39,6 +62,7 @@ export const TaskPage = () => {
   const isLoading = taskLoading || slidesLoading;
   const [uploading, setUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [currentSlide, setCurrentSlide] = useState(0);
 
   // 生成所有脚本 mutation
   const generateScriptsMutation = useMutation({
@@ -51,6 +75,50 @@ export const TaskPage = () => {
       message.error(error.message || '脚本生成失败');
     },
   });
+
+  // 生成所有音频 mutation
+  const generateAllAudioMutation = useMutation({
+    mutationFn: () => generateAllAudio(id!),
+    onSuccess: () => {
+      message.success('音频批量生成完成');
+      refreshSlides();
+      queryClient.invalidateQueries({ queryKey: ['task', id] });
+    },
+    onError: (error: Error) => {
+      message.error(error.message || '音频生成失败');
+    },
+  });
+
+  // 合成视频 mutation
+  const synthesizeVideoMutation = useMutation({
+    mutationFn: () => synthesizeVideo(id!),
+    onSuccess: (data) => {
+      message.success('视频合成完成');
+      queryClient.invalidateQueries({ queryKey: ['task', id] });
+    },
+    onError: (error: Error) => {
+      message.error(error.message || '视频合成失败');
+    },
+  });
+
+  // 上传截图 mutation
+  const uploadScreenshotsMutation = useMutation({
+    mutationFn: (files: File[]) => uploadScreenshots(id!, files),
+    onSuccess: () => {
+      message.success('截图上传成功');
+      refreshSlides();
+      queryClient.invalidateQueries({ queryKey: ['task', id] });
+    },
+    onError: (error: Error) => {
+      message.error(error.message || '截图上传失败');
+    },
+  });
+
+  // 处理截图上传
+  const handleScreenshotsUpload = (fileList: File[]) => {
+    if (fileList.length === 0) return;
+    uploadScreenshotsMutation.mutate(fileList);
+  };
 
   // 上传 PPT mutation
   const uploadMutation = useMutation({
@@ -88,19 +156,12 @@ export const TaskPage = () => {
     fileInputRef.current?.click();
   };
 
-  // 步骤配置
-  const steps = [
-    { title: '上传PPT', icon: <UploadOutlined /> },
-    { title: '脚本生成', icon: <FileTextOutlined /> },
-    { title: '音频生成', icon: <SoundOutlined /> },
-  ];
-
   // 加载状态
   if (isLoading || taskLoading) {
     return (
-      <Layout style={{ minHeight: '100vh' }}>
-        <Content style={{ padding: '24px' }}>
-          <Card loading />
+      <Layout style={{ minHeight: '100vh', background: '#f0f2f5' }}>
+        <Content style={{ height: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <Card loading style={{ width: 400 }} />
         </Content>
       </Layout>
     );
@@ -110,8 +171,8 @@ export const TaskPage = () => {
   if (taskError) {
     const errorMessage = taskError instanceof Error ? taskError.message : '加载失败';
     return (
-      <Layout style={{ minHeight: '100vh' }}>
-        <Content style={{ padding: '24px' }}>
+      <Layout style={{ minHeight: '100vh', background: '#f0f2f5' }}>
+        <Content style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
           <Result
             status="error"
             title="加载失败"
@@ -125,12 +186,11 @@ export const TaskPage = () => {
 
   // 待上传状态 - 显示上传界面
   if (!task || task.status === 'pending') {
-    const stepIndex = getStepIndex('pending');
     return (
-      <Layout style={{ minHeight: '100vh' }}>
+      <Layout style={{ minHeight: '100vh', background: '#f0f2f5' }}>
         <Header style={{
           background: '#fff',
-          padding: '0 24px',
+          padding: '0 16px',
           display: 'flex',
           alignItems: 'center',
           borderBottom: '1px solid #f0f0f0',
@@ -142,9 +202,8 @@ export const TaskPage = () => {
             <Title level={4} style={{ margin: 0 }}>新任务</Title>
           </Space>
         </Header>
-        <Content style={{ padding: '24px', maxWidth: 800, margin: '0 auto', width: '100%' }}>
-          <Steps current={stepIndex} items={steps} style={{ marginBottom: 40 }} />
-          <Card style={{ textAlign: 'center', padding: '40px 0' }}>
+        <Content style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: 'calc(100vh - 64px)' }}>
+          <Card style={{ width: 480, textAlign: 'center', padding: '48px 32px' }}>
             <input
               type="file"
               ref={fileInputRef}
@@ -152,8 +211,19 @@ export const TaskPage = () => {
               style={{ display: 'none' }}
               onChange={handleFileChange}
             />
-            <div style={{ marginBottom: 16 }}>
-              <UploadOutlined style={{ fontSize: 64, color: '#1890ff' }} />
+            <div style={{ marginBottom: 24 }}>
+              <div style={{
+                width: 80,
+                height: 80,
+                borderRadius: '50%',
+                background: '#e6f4ff',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                margin: '0 auto',
+              }}>
+                <FileTextOutlined style={{ fontSize: 36, color: '#1890ff' }} />
+              </div>
             </div>
             <Title level={4}>上传 PPT 文件</Title>
             <Text type="secondary" style={{ display: 'block', marginBottom: 24 }}>
@@ -162,7 +232,7 @@ export const TaskPage = () => {
             <Button
               type="primary"
               size="large"
-              icon={<UploadOutlined />}
+              icon={<FileTextOutlined />}
               onClick={triggerUpload}
               loading={uploading}
             >
@@ -177,11 +247,21 @@ export const TaskPage = () => {
   // 根据任务状态计算当前步骤
   const currentStep = task ? getStepIndex(task.status) : 0;
 
+  const slides = taskDetail?.slides || [];
+  const currentSlideData = slides[currentSlide];
+
+  // 计算进度
+  const audioGeneratedCount = slides.filter(s => s.audio).length;
+  const audioProgress = slides.length > 0 ? Math.round((audioGeneratedCount / slides.length) * 100) : 0;
+
+  // 检查是否已合成视频
+  const isVideoReady = task.status === 'video_ready';
+
   return (
-    <Layout style={{ minHeight: '100vh' }}>
+    <Layout style={{ minHeight: '100vh', background: '#f0f2f5' }}>
       <Header style={{
         background: '#fff',
-        padding: '0 24px',
+        padding: '0 16px',
         display: 'flex',
         alignItems: 'center',
         borderBottom: '1px solid #f0f0f0',
@@ -194,46 +274,151 @@ export const TaskPage = () => {
         </Space>
       </Header>
 
-      <Content style={{ padding: '24px', maxWidth: 1400, margin: '0 auto', width: '100%' }}>
-        {/* 步骤条 */}
-        <Card style={{ marginBottom: '24px' }}>
-          <Steps current={currentStep} items={steps} />
+      <Content style={{ padding: 16, height: 'calc(100vh - 64px)', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+        {/* 顶部区域：步骤条 + 操作栏 */}
+        <Card style={{ marginBottom: 12, flexShrink: 0 }}>
+          <Flex justify="space-between" align="center" wrap gap={12}>
+            <Steps current={currentStep} items={steps} size="small" style={{ flex: 1, minWidth: 300 }} />
+            <Space wrap>
+              {/* 步骤1操作 */}
+              {currentStep === 1 && (
+                <>
+                  <Button
+                    type="primary"
+                    icon={<FileTextOutlined />}
+                    onClick={() => generateScriptsMutation.mutate()}
+                    loading={generateScriptsMutation.isPending}
+                  >
+                    批量生成脚本
+                  </Button>
+                  <Button
+                    icon={<SoundOutlined />}
+                    onClick={() => generateAllAudioMutation.mutate()}
+                    loading={generateAllAudioMutation.isPending}
+                    disabled={slides.every(s => s.audio)}
+                  >
+                    批量生成音频
+                  </Button>
+                  <Text type="secondary">
+                    音频: {audioGeneratedCount}/{slides.length} ({audioProgress}%)
+                  </Text>
+                </>
+              )}
+              {/* 步骤2操作 */}
+              {currentStep === 2 && (
+                <>
+                  {/* 上传截图按钮 */}
+                  <Upload
+                    accept="image/*"
+                    multiple
+                    showUploadList={false}
+                    onChange={({ fileList }) => {
+                      const files = fileList.map(f => f.originFileObj!).filter(Boolean);
+                      if (files.length > 0) {
+                        handleScreenshotsUpload(files);
+                      }
+                    }}
+                  >
+                    <Button icon={<PictureOutlined />}>
+                      上传截图
+                    </Button>
+                  </Upload>
+                  <Text type="secondary">
+                    (支持: 幻灯片1.jpeg, page_1.png, slide_1.png)
+                  </Text>
+
+                  {isVideoReady ? (
+                    <Tag color="success" icon={<CheckCircleFilled />} style={{ fontSize: 14, padding: '4px 12px' }}>
+                      视频已合成
+                    </Tag>
+                  ) : (
+                    <Button
+                      type="primary"
+                      icon={<VideoCameraOutlined />}
+                      onClick={() => synthesizeVideoMutation.mutate()}
+                      loading={synthesizeVideoMutation.isPending}
+                      disabled={audioGeneratedCount < slides.length}
+                    >
+                      合成视频
+                    </Button>
+                  )}
+                  <Button
+                    icon={<ReloadOutlined spin={synthesizeVideoMutation.isPending} />}
+                    onClick={() => synthesizeVideoMutation.mutate()}
+                    loading={synthesizeVideoMutation.isPending}
+                    disabled={audioGeneratedCount < slides.length}
+                  >
+                    重新合成
+                  </Button>
+                  {task.video_path && (
+                    <Button
+                      icon={<DownloadOutlined />}
+                      onClick={() => {
+                        const link = document.createElement('a');
+                        const videoFilename = task.video_path.split('/').pop();
+                        link.href = `/static/video/${id}/${videoFilename}`;
+                        link.download = videoFilename;
+                        document.body.appendChild(link);
+                        link.click();
+                        document.body.removeChild(link);
+                      }}
+                    >
+                      下载视频
+                    </Button>
+                  )}
+                </>
+              )}
+            </Space>
+          </Flex>
         </Card>
 
-        {/* 操作按钮 */}
-        <Card style={{ marginBottom: '24px' }}>
-          <Space wrap>
+        {/* 幻灯片走马灯 */}
+        <Card style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+          {/* 走马灯导航 */}
+          <Flex justify="space-between" align="center" style={{ marginBottom: 12 }}>
             <Button
-              type="primary"
-              onClick={() => generateScriptsMutation.mutate()}
-              loading={generateScriptsMutation.isPending}
-              disabled={task.status === 'pending'}
+              icon={<LeftOutlined />}
+              onClick={() => carouselRef.current?.prev()}
+              disabled={currentSlide === 0}
             >
-              {generateScriptsMutation.isPending ? '生成中...' : '批量生成脚本'}
+              上一页
             </Button>
-          </Space>
-        </Card>
+            <Space>
+              <span style={{
+                background: '#1890ff',
+                color: '#fff',
+                padding: '4px 12px',
+                borderRadius: 16,
+                fontSize: 14,
+              }}>
+                {currentSlide + 1} / {slides.length}
+              </span>
+              {currentSlideData?.script && (
+                <Tag color="blue" icon={<CheckCircleFilled />}>脚本</Tag>
+              )}
+              {currentSlideData?.audio && (
+                <Tag color="green" icon={<CheckCircleFilled />}>
+                  音频 {Math.round(currentSlideData.audio.duration)}s
+                </Tag>
+              )}
+            </Space>
+            <Button
+              onClick={() => carouselRef.current?.next()}
+              disabled={currentSlide >= slides.length - 1}
+            >
+              下一页 <RightOutlined />
+            </Button>
+          </Flex>
 
-        {/* 幻灯片列表 */}
-        <div>
-          <Title level={4}>幻灯片 ({taskDetail.slides.length} 页)</Title>
-
-          {taskDetail.slides.length === 0 ? (
-            <Empty description="暂无幻灯片数据" />
-          ) : (
-            <Collapse
-              accordion
-              defaultActiveKey={['1']}
-              items={taskDetail.slides.map((slide: SlideData) => ({
-                key: slide.page_num,
-                label: (
-                  <Space>
-                    <Text strong>第 {slide.page_num} 页</Text>
-                    {slide.script && <Tag color="blue">已生成脚本</Tag>}
-                    {slide.audio && <Tag color="green">已生成音频</Tag>}
-                  </Space>
-                ),
-                children: (
+          {/* 走马灯 */}
+          <div style={{ flex: 1, overflow: 'hidden' }}>
+            <Carousel
+              ref={carouselRef}
+              beforeChange={(_, newSlide) => setCurrentSlide(newSlide)}
+              style={{ height: '100%' }}
+            >
+              {slides.map((slide: SlideData) => (
+                <div key={slide.page_num} style={{ height: '100%' }}>
                   <SlideCard
                     taskId={id!}
                     slide={slide}
@@ -241,17 +426,17 @@ export const TaskPage = () => {
                       queryClient.invalidateQueries({ queryKey: ['slides', id] });
                     }}
                   />
-                ),
-              }))}
-            />
-          )}
-        </div>
+                </div>
+              ))}
+            </Carousel>
+          </div>
+        </Card>
       </Content>
     </Layout>
   );
 };
 
-// 幻灯片卡片组件
+// 幻灯片卡片组件 - 左右各50%布局
 const SlideCard = ({ taskId, slide, onUpdate }: { taskId: string; slide: SlideData; onUpdate: () => void }) => {
   const [script, setScript] = useState(slide.script || '');
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
@@ -294,6 +479,22 @@ const SlideCard = ({ taskId, slide, onUpdate }: { taskId: string; slide: SlideDa
     },
   });
 
+  // 强制重新生成音频（不管是否已有音频）
+  const forceRegenerateMutation = useMutation({
+    mutationFn: async () => {
+      // 先删除旧音频，再生成新的
+      await generateAudio(taskId, slide.page_num);
+    },
+    onSuccess: () => {
+      setAudioUrl(getAudioUrl(taskId, slide.page_num));
+      message.success('音频重新生成成功');
+      onUpdate();
+    },
+    onError: (error: Error) => {
+      message.error(error.message || '音频重新生成失败');
+    },
+  });
+
   const handleSave = () => {
     updateScriptMutation.mutate(script);
   };
@@ -303,6 +504,18 @@ const SlideCard = ({ taskId, slide, onUpdate }: { taskId: string; slide: SlideDa
   };
 
   const handleGenerateAudio = () => {
+    // 如果已有音频，直接播放
+    if (slide.audio?.audio_path) {
+      const url = getAudioUrl(taskId, slide.page_num);
+      setAudioUrl(url);
+      // 播放音频
+      setTimeout(() => {
+        const audio = document.getElementById(`audio-${taskId}-${slide.page_num}`) as HTMLAudioElement;
+        audio?.play().catch(() => {});
+      }, 100);
+      message.success('音频已准备，点击播放按钮即可收听');
+      return;
+    }
     if (!script.trim()) {
       message.warning('请先生成或编辑脚本');
       return;
@@ -332,118 +545,183 @@ const SlideCard = ({ taskId, slide, onUpdate }: { taskId: string; slide: SlideDa
   }, [slide.audio, taskId, slide.page_num]);
 
   return (
-    <div>
-      {/* 幻灯片截图 */}
-      {slide.screenshot ? (
-        <div style={{ marginBottom: 16 }}>
-          <Text strong>幻灯片预览：</Text>
-          <div style={{ marginTop: 8 }}>
+    <div style={{ display: 'flex', gap: 16, height: '100%' }}>
+      {/* 左侧：幻灯片预览 - 50% */}
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+        <Text strong style={{ marginBottom: 8 }}>幻灯片预览</Text>
+        <div style={{ flex: 1, overflow: 'auto', background: '#f5f5f5', borderRadius: 8, padding: 12 }}>
+          {slide.screenshot ? (
             <img
               src={slide.screenshot}
               alt={`第 ${slide.page_num} 页`}
-              style={{ maxWidth: '100%', maxHeight: 300, border: '1px solid #d9d9d9', borderRadius: 4 }}
+              style={{
+                width: '100%',
+                borderRadius: 6,
+                border: '1px solid #d9d9d9',
+                display: 'block',
+              }}
             />
-          </div>
+          ) : (
+            <div
+              style={{
+                padding: 12,
+                background: '#fff',
+                borderRadius: 6,
+                fontSize: 13,
+                minHeight: 200,
+                overflow: 'auto',
+                whiteSpace: 'pre-wrap',
+                border: '1px solid #d9d9d9',
+              }}
+            >
+              {slide.content || '[无文本内容]'}
+            </div>
+          )}
         </div>
-      ) : null}
+      </div>
 
-      <div style={{ marginBottom: 16 }}>
-        <Text strong>幻灯片内容：</Text>
-        <Paragraph
-          copyable
-          style={{
-            marginTop: 8,
-            padding: 12,
-            background: '#f5f5f5',
-            borderRadius: 4,
-            whiteSpace: 'pre-wrap',
-          }}
+      {/* 右侧：脚本编辑 + 音频 - 50% */}
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        {/* 脚本编辑区 */}
+        <Card
+          size="small"
+          title={
+            <Flex justify="space-between" align="center">
+              <Space>
+                <FileTextOutlined style={{ color: '#1890ff' }} />
+                <span>讲解脚本</span>
+                {slide.script && slide.script !== slide.content && (
+                  <Tag color="blue">已生成</Tag>
+                )}
+              </Space>
+              <Button
+                size="small"
+                icon={<ReloadOutlined spin={generateScriptMutation.isPending} />}
+                onClick={handleGenerateScript}
+                loading={generateScriptMutation.isPending}
+              >
+                AI 生成
+              </Button>
+            </Flex>
+          }
+          bodyStyle={{ flex: 1, display: 'flex', flexDirection: 'column', padding: 12 }}
+          style={{ flex: 1, marginBottom: 12, display: 'flex', flexDirection: 'column' }}
         >
-          {slide.content || '[无文本内容]'}
-        </Paragraph>
-      </div>
-
-      <div style={{ marginBottom: 16 }}>
-        <Space style={{ marginBottom: 8 }}>
-          <Text strong>讲解脚本：</Text>
-          <Button
-            size="small"
-            onClick={handleGenerateScript}
-            loading={generateScriptMutation.isPending}
-          >
-            AI 生成
-          </Button>
-        </Space>
-        <textarea
-          value={script}
-          onChange={(e) => setScript(e.target.value)}
-          style={{
-            width: '100%',
-            minHeight: 100,
-            padding: 12,
-            borderRadius: 4,
-            border: '1px solid #d9d9d9',
-            resize: 'vertical',
-          }}
-          placeholder="输入或生成讲解脚本..."
-        />
-        <div style={{ marginTop: 8 }}>
-          <Button
-            type="primary"
-            onClick={handleSave}
-            loading={updateScriptMutation.isPending}
-          >
-            保存脚本
-          </Button>
-        </div>
-      </div>
-
-      <div>
-        <Space style={{ marginBottom: 8 }}>
-          <Text strong>音频：</Text>
-          {!slide.audio ? (
+          <textarea
+            value={script}
+            onChange={(e) => setScript(e.target.value)}
+            style={{
+              flex: 1,
+              width: '100%',
+              padding: 12,
+              borderRadius: 6,
+              border: '1px solid #d9d9d9',
+              resize: 'none',
+              fontSize: 14,
+              lineHeight: 1.6,
+              minHeight: 150,
+            }}
+            placeholder="输入或生成讲解脚本..."
+          />
+          <Flex justify="flex-end" style={{ marginTop: 12 }}>
             <Button
               type="primary"
-              icon={<SoundOutlined />}
-              onClick={handleGenerateAudio}
-              loading={generateAudioMutation.isPending}
+              icon={<SaveOutlined />}
+              onClick={handleSave}
+              loading={updateScriptMutation.isPending}
               disabled={!script.trim()}
             >
-              {generateAudioMutation.isPending ? '生成中...' : '生成音频'}
+              保存脚本
             </Button>
-          ) : (
-            <>
-              <Tag color="green">已生成 ({Math.round(slide.audio.duration)}秒)</Tag>
-              <Button
-                icon={<PlayCircleOutlined />}
-                onClick={() => setAudioUrl(getAudioUrl(taskId, slide.page_num))}
-              >
-                播放
-              </Button>
-              <Button
-                icon={<DownloadOutlined />}
-                onClick={handleDownload}
-              >
-                下载
-              </Button>
-              <Button
-                icon={<SoundOutlined />}
-                onClick={handleGenerateAudio}
-                loading={generateAudioMutation.isPending}
-              >
-                重新生成
-              </Button>
-            </>
-          )}
-        </Space>
+          </Flex>
+        </Card>
 
-        {audioUrl && (
-          <audio
-            src={audioUrl}
-            controls
-            style={{ width: '100%', marginTop: 8 }}
-          />
-        )}
+        {/* 音频区 */}
+        <Card
+          size="small"
+          title={
+            <Flex justify="space-between" align="center">
+              <Space>
+                <SoundOutlined style={{ color: '#52c41a' }} />
+                <span>语音音频</span>
+              </Space>
+              {!slide.audio && (
+                <Button
+                  type="primary"
+                  size="small"
+                  icon={<SoundOutlined />}
+                  onClick={handleGenerateAudio}
+                  loading={generateAudioMutation.isPending}
+                  disabled={!script.trim() && !slide.audio?.audio_path}
+                >
+                  生成音频
+                </Button>
+              )}
+            </Flex>
+          }
+          bodyStyle={{ padding: 12 }}
+        >
+          {slide.audio ? (
+            <div>
+              <Flex align="center" gap={8} wrap style={{ marginBottom: 12 }}>
+                <Tag color="success" icon={<CheckCircleFilled />}>
+                  已生成 {Math.round(slide.audio.duration)} 秒
+                </Tag>
+                <Button
+                  size="small"
+                  icon={<PlayCircleOutlined />}
+                  onClick={() => {
+                    const url = getAudioUrl(taskId, slide.page_num);
+                    setAudioUrl(url);
+                    setTimeout(() => {
+                      const audio = document.getElementById(`audio-${taskId}-${slide.page_num}`) as HTMLAudioElement;
+                      audio?.play().catch(() => {});
+                    }, 100);
+                  }}
+                >
+                  播放
+                </Button>
+                <Button
+                  size="small"
+                  icon={<DownloadOutlined />}
+                  onClick={handleDownload}
+                >
+                  下载
+                </Button>
+                <Button
+                  size="small"
+                  icon={<ReloadOutlined spin={generateAudioMutation.isPending} />}
+                  onClick={handleGenerateAudio}
+                  loading={generateAudioMutation.isPending}
+                >
+                  播放
+                </Button>
+                <Button
+                  size="small"
+                  icon={<SyncOutlined spin={forceRegenerateMutation.isPending} />}
+                  onClick={() => forceRegenerateMutation.mutate()}
+                  loading={forceRegenerateMutation.isPending}
+                  danger
+                >
+                  重新生成
+                </Button>
+              </Flex>
+              {audioUrl && (
+                <audio
+                  id={`audio-${taskId}-${slide.page_num}`}
+                  src={audioUrl}
+                  controls
+                  style={{ width: '100%', marginTop: 8 }}
+                />
+              )}
+            </div>
+          ) : (
+            <Flex align="center" justify="center" style={{ padding: 24, color: '#999', background: '#fafafa', borderRadius: 6 }}>
+              <SoundOutlined style={{ fontSize: 24, marginRight: 8 }} />
+              <div>请先编辑或生成脚本，然后生成音频</div>
+            </Flex>
+          )}
+        </Card>
       </div>
     </div>
   );

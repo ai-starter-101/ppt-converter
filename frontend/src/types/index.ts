@@ -5,6 +5,7 @@ export type TaskStatus =
   | 'processing'   // 处理中（生成脚本/音频）
   | 'script_ready' // 脚本已生成/编辑完成
   | 'audio_ready'  // 音频已生成
+  | 'video_ready'  // 视频已合成
   | 'failed';      // 处理失败
 
 // 单页幻灯片数据
@@ -34,9 +35,11 @@ export interface Task {
   slides_content?: string;  // JSON
   slides_script?: string;   // JSON
   slides_audio?: string;    // JSON
+  slides_video?: string;    // 合成视频路径 JSON
   script?: string;          // 兼容旧版本
   audio_path?: string;
   audio_duration?: number;
+  video_path?: string;      // 合成后的视频/PPT路径
   created_at: string;
   updated_at: string;
 }

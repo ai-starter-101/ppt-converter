@@ -25,7 +25,16 @@ apiClient.interceptors.request.use(
 apiClient.interceptors.response.use(
   (response) => response.data,
   (error) => {
-    const message = error.response?.data?.detail || error.message || '请求失败';
+    let message = '请求失败';
+    if (error.response) {
+      // 服务器返回错误状态码
+      message = error.response.data?.detail || error.response.data?.message || `HTTP ${error.response.status}`;
+    } else if (error.request) {
+      // 请求发出但没有收到响应
+      message = '网络错误，请检查后端服务是否运行';
+    } else {
+      message = error.message || '请求失败';
+    }
     console.error('API Error:', message);
     return Promise.reject(new Error(message));
   }
