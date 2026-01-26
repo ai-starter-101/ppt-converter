@@ -2,7 +2,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Layout, Button, Typography, Space, Card, Result, message, Tag, Steps, Flex, Carousel, Upload } from 'antd';
+import { Layout, Button, Typography, Space, Card, Result, message, Tag, Steps, Flex, Carousel, Upload, Modal, Progress } from 'antd';
 import type { CarouselRef } from 'antd/es/carousel';
 import {
   ArrowLeftOutlined,
@@ -20,7 +20,7 @@ import {
   PictureOutlined,
   SyncOutlined,
 } from '@ant-design/icons';
-import { getTask, getSlides, generateScripts, updateScript, generateSingleScript, generateAudio, getAudioUrl, uploadPPT, generateAllAudio, synthesizeVideo, uploadScreenshots } from '../../api/task';
+import { getTask, getSlides, generateScripts, updateScript, generateSingleScript, generateAudio, getAudioUrl, uploadPPT, generateAllAudioStream, synthesizeVideo, uploadScreenshots } from '../../api/task';
 import type { SlideData } from '../../types';
 import { getStepIndex } from '../../store/useTaskStore';
 
@@ -64,6 +64,14 @@ export const TaskPage = () => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [currentSlide, setCurrentSlide] = useState(0);
 
+  // 进度弹窗状态
+  const [progressModalOpen, setProgressModalOpen] = useState(false);
+  const [progressPercent, setProgressPercent] = useState(0);
+  const [progressCurrent, setProgressCurrent] = useState(0);
+  const [progressTotal, setProgressTotal] = useState(0);
+  const [progressPageNum, setProgressPageNum] = useState<number | null>(null);
+  const [progressSkipped, setProgressSkipped] = useState(0);
+
   // 生成所有脚本 mutation
   const generateScriptsMutation = useMutation({
     mutationFn: () => generateScripts(id!),
@@ -76,18 +84,42 @@ export const TaskPage = () => {
     },
   });
 
-  // 生成所有音频 mutation
-  const generateAllAudioMutation = useMutation({
-    mutationFn: () => generateAllAudio(id!),
-    onSuccess: () => {
-      message.success('音频批量生成完成');
-      refreshSlides();
-      queryClient.invalidateQueries({ queryKey: ['task', id] });
-    },
-    onError: (error: Error) => {
-      message.error(error.message || '音频生成失败');
-    },
-  });
+  // 流式生成所有音频
+  const handleGenerateAllAudio = async () => {
+    if (!id) return;
+
+    // 计算已成功的页面数量
+    const existingSuccessCount = slides.filter(s => s.audio).length;
+    setProgressSkipped(existingSuccessCount);
+
+    setProgressModalOpen(true);
+    setProgressPercent(0);
+    setProgressCurrent(0);
+    setProgressTotal(0);
+    setProgressPageNum(null);
+
+    try {
+      await generateAllAudioStream(id, (data) => {
+        if (data.type === 'progress') {
+          setProgressCurrent(data.current || 0);
+          setProgressTotal(data.total || 0);
+          setProgressPercent(data.percent || 0);
+          setProgressPageNum(data.page_num || null);
+        } else if (data.type === 'script_saved') {
+          message.info(data.message);
+          refreshSlides();
+        } else if (data.type === 'complete') {
+          message.success('音频批量生成完成');
+          refreshSlides();
+          queryClient.invalidateQueries({ queryKey: ['task', id] });
+          setProgressModalOpen(false);
+        }
+      });
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '音频生成失败');
+      setProgressModalOpen(false);
+    }
+  };
 
   // 合成视频 mutation
   const synthesizeVideoMutation = useMutation({
@@ -293,8 +325,7 @@ export const TaskPage = () => {
                   </Button>
                   <Button
                     icon={<SoundOutlined />}
-                    onClick={() => generateAllAudioMutation.mutate()}
-                    loading={generateAllAudioMutation.isPending}
+                    onClick={handleGenerateAllAudio}
                     disabled={slides.every(s => s.audio)}
                   >
                     批量生成音频
@@ -432,6 +463,42 @@ export const TaskPage = () => {
           </div>
         </Card>
       </Content>
+
+      {/* 进度弹窗 */}
+      <Modal
+        title="生成音频中..."
+        open={progressModalOpen}
+        closable={false}
+        footer={null}
+        maskClosable={false}
+        width={400}
+      >
+        <div style={{ padding: '16px 0' }}>
+          <Progress
+            percent={progressPercent}
+            status="active"
+            strokeColor={{
+              '0%': '#108ee9',
+              '100%': '#87d068',
+            }}
+          />
+          <div style={{ marginTop: 16, textAlign: 'center', color: '#666' }}>
+            {progressPageNum ? (
+              <span>正在生成第 {progressPageNum} 页音频...</span>
+            ) : (
+              <span>准备中...</span>
+            )}
+          </div>
+          <div style={{ marginTop: 8, textAlign: 'center', color: '#999', fontSize: 12 }}>
+            {progressCurrent} / {progressTotal} 页
+            {progressSkipped > 0 && (
+              <span style={{ marginLeft: 12, color: '#52c41a' }}>
+                (已跳过 {progressSkipped} 个成功页面)
+              </span>
+            )}
+          </div>
+        </div>
+      </Modal>
     </Layout>
   );
 };
@@ -470,7 +537,8 @@ const SlideCard = ({ taskId, slide, onUpdate }: { taskId: string; slide: SlideDa
   const generateAudioMutation = useMutation({
     mutationFn: () => generateAudio(taskId, slide.page_num),
     onSuccess: () => {
-      setAudioUrl(getAudioUrl(taskId, slide.page_num));
+      // 添加时间戳避免缓存
+      setAudioUrl(`${getAudioUrl(taskId, slide.page_num)}?t=${Date.now()}`);
       message.success('音频生成成功');
       onUpdate();
     },
@@ -480,13 +548,24 @@ const SlideCard = ({ taskId, slide, onUpdate }: { taskId: string; slide: SlideDa
   });
 
   // 强制重新生成音频（不管是否已有音频）
+  const handleForceRegenerateAudio = () => {
+    // 检查脚本是否发生变化
+    const originalScript = slide.content || '';
+    if (script.trim() === originalScript.trim()) {
+      message.warning('脚本未修改，不需要重新生成音频！');
+      return;
+    }
+    forceRegenerateMutation.mutate();
+  };
+
   const forceRegenerateMutation = useMutation({
     mutationFn: async () => {
       // 先删除旧音频，再生成新的
       await generateAudio(taskId, slide.page_num);
     },
     onSuccess: () => {
-      setAudioUrl(getAudioUrl(taskId, slide.page_num));
+      // 添加时间戳避免缓存
+      setAudioUrl(`${getAudioUrl(taskId, slide.page_num)}?t=${Date.now()}`);
       message.success('音频重新生成成功');
       onUpdate();
     },
@@ -540,7 +619,8 @@ const SlideCard = ({ taskId, slide, onUpdate }: { taskId: string; slide: SlideDa
   // 设置音频 URL
   useEffect(() => {
     if (slide.audio?.audio_path) {
-      setAudioUrl(getAudioUrl(taskId, slide.page_num));
+      // 添加时间戳避免缓存
+      setAudioUrl(`${getAudioUrl(taskId, slide.page_num)}?t=${Date.now()}`);
     }
   }, [slide.audio, taskId, slide.page_num]);
 
@@ -699,7 +779,7 @@ const SlideCard = ({ taskId, slide, onUpdate }: { taskId: string; slide: SlideDa
                 <Button
                   size="small"
                   icon={<SyncOutlined spin={forceRegenerateMutation.isPending} />}
-                  onClick={() => forceRegenerateMutation.mutate()}
+                  onClick={handleForceRegenerateAudio}
                   loading={forceRegenerateMutation.isPending}
                   danger
                 >

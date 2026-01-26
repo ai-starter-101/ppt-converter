@@ -258,14 +258,59 @@ async def generate_audio(text: str, output_path: str) -> float:
         )
 
 
-async def generate_audio_per_page(slides_script: List[Dict], audio_dir: str) -> List[Dict]:
-    """按页生成音频文件"""
+async def generate_audio_per_page(
+    slides_script: List[Dict],
+    audio_dir: str,
+    progress_callback=None,
+    existing_audios: List[Dict] = None
+) -> List[Dict]:
+    """按页生成音频文件
+
+    Args:
+        slides_script: 脚本列表
+        audio_dir: 音频输出目录
+        progress_callback: 进度回调函数，接收 (current, total, page_num) 参数
+        existing_audios: 已有的音频信息列表，用于跳过已成功的页面
+    """
     Path(audio_dir).mkdir(parents=True, exist_ok=True)
     results = []
+    total = len(slides_script)
 
-    for slide in slides_script:
+    # 构建已成功的页面集合
+    successful_pages: set = set()
+    if existing_audios:
+        for audio in existing_audios:
+            if audio.get("audio_path") and Path(audio["audio_path"]).exists():
+                successful_pages.add(audio["page_num"])
+
+    # 实际需要生成的页面
+    scripts_to_generate = [s for s in slides_script if s["page_num"] not in successful_pages]
+    generate_total = len(scripts_to_generate)
+
+    if generate_total == 0:
+        # 所有页面都已生成完成
+        if progress_callback:
+            progress_callback(total, total, None)
+        return existing_audios or []
+
+    generated_count = 0
+
+    for idx, slide in enumerate(slides_script):
         page_num = slide["page_num"]
         script = slide.get("script", "")
+
+        # 如果已有成功的结果，跳过
+        if page_num in successful_pages:
+            # 直接使用已有的结果
+            existing = next((a for a in (existing_audios or []) if a["page_num"] == page_num), None)
+            if existing:
+                results.append(existing)
+            continue
+
+        # 报告进度（只计算需要生成的数量）
+        generated_count += 1
+        if progress_callback:
+            progress_callback(generated_count, generate_total, page_num)
 
         if not script or script.strip() == "":
             results.append({
@@ -292,6 +337,10 @@ async def generate_audio_per_page(slides_script: List[Dict], audio_dir: str) -> 
                 "duration": 0,
                 "error": str(e)
             })
+
+    # 报告完成
+    if progress_callback:
+        progress_callback(generate_total, generate_total, None)
 
     return results
 

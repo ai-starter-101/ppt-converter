@@ -1,9 +1,11 @@
 """任务相关 API 路由"""
 import uuid
 import json
+import asyncio
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Callable
 from fastapi import APIRouter, HTTPException, UploadFile, File, Depends, Query
+from fastapi.responses import StreamingResponse
 from sqlmodel import Session, select
 from app.database import get_session
 from app.models import Task, slides_to_json, parse_slides_json
@@ -20,6 +22,9 @@ from app.config import settings
 import aiofiles
 
 router = APIRouter(prefix="/api/tasks", tags=["任务管理"])
+
+# 存储进度回调 {task_id: (queue, cancel_event)}
+progress_stores: dict = {}
 
 
 # 添加 OPTIONS 路由处理 CORS 预检请求
@@ -426,6 +431,19 @@ async def get_audio_page(task_id: str, page_num: int, session: Session = Depends
     return response
 
 
+@router.options("/{task_id}/audio/generate-all")
+async def audio_generate_all_options():
+    """处理批量音频生成请求的 CORS 预检"""
+    from fastapi.responses import Response
+    return Response(
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+        }
+    )
+
+
 @router.post("/{task_id}/audio/generate-all")
 async def generate_all_audio(
     task_id: str,
@@ -437,9 +455,17 @@ async def generate_all_audio(
         raise HTTPException(status_code=404, detail="任务不存在")
 
     if task.status not in ["uploaded", "script_ready"]:
-        raise HTTPException(status_code=400, detail="请先生成脚本")
+        raise HTTPException(status_code=400, detail="请先上传 PPT 文件")
 
     scripts = parse_slides_json(task.slides_script)
+    slides_content = parse_slides_json(task.slides_content)
+
+    # 如果没有脚本，使用 PPT 内容作为默认脚本
+    if not scripts:
+        scripts = [{"page_num": s["page_num"], "script": s["content"]} for s in slides_content]
+        # 保存生成的脚本到数据库
+        task.slides_script = slides_to_json(scripts)
+        session.commit()
 
     # 过滤有脚本的页面
     valid_scripts = [s for s in scripts if s.get("script", "").strip()]
@@ -447,9 +473,12 @@ async def generate_all_audio(
     if not valid_scripts:
         raise HTTPException(status_code=400, detail="没有可生成音频的脚本")
 
+    # 获取已有的音频信息，跳过已成功的页面
+    existing_audios = parse_slides_json(task.slides_audio)
+
     # 按页生成音频
     audio_dir = settings.audio_dir / task_id
-    audio_results = await generate_audio_per_page(valid_scripts, str(audio_dir))
+    audio_results = await generate_audio_per_page(valid_scripts, str(audio_dir), existing_audios=existing_audios)
 
     task.slides_audio = slides_to_json(audio_results)
     task.status = "audio_ready"
@@ -460,6 +489,80 @@ async def generate_all_audio(
         "audios": audio_results,
         "status": task.status
     }
+
+
+async def audio_generator_stream(task_id: str, session: Session):
+    """生成音频并流式输出进度"""
+    task = session.get(Task, task_id)
+    if not task:
+        yield json.dumps({"error": "任务不存在"})
+        return
+
+    if task.status not in ["uploaded", "script_ready"]:
+        yield json.dumps({"error": "请先上传 PPT 文件"})
+        return
+
+    scripts = parse_slides_json(task.slides_script)
+    slides_content = parse_slides_json(task.slides_content)
+
+    # 如果没有脚本，使用 PPT 内容作为默认脚本
+    if not scripts:
+        scripts = [{"page_num": s["page_num"], "script": s["content"]} for s in slides_content]
+        task.slides_script = slides_to_json(scripts)
+        session.commit()
+        yield json.dumps({"type": "script_saved", "message": "已使用 PPT 内容作为默认脚本"})
+
+    valid_scripts = [s for s in scripts if s.get("script", "").strip()]
+
+    if not valid_scripts:
+        yield json.dumps({"error": "没有可生成音频的脚本"})
+        return
+
+    # 获取已有的音频信息，跳过已成功的页面
+    existing_audios = parse_slides_json(task.slides_audio)
+
+    audio_dir = settings.audio_dir / task_id
+
+    # 进度回调
+    async def progress_callback(current: int, total: int, page_num: Optional[int]):
+        data = {
+            "type": "progress",
+            "current": current,
+            "total": total,
+            "percent": round(current / total * 100) if total > 0 else 100,
+            "page_num": page_num
+        }
+        yield json.dumps(data)
+
+    # 生成音频（跳过已成功的页面）
+    audio_results = await generate_audio_per_page(valid_scripts, str(audio_dir), progress_callback, existing_audios)
+
+    task.slides_audio = slides_to_json(audio_results)
+    task.status = "audio_ready"
+    session.commit()
+
+    yield json.dumps({"type": "complete", "status": "audio_ready"})
+
+
+@router.get("/{task_id}/audio/generate-all/stream")
+async def stream_audio_generation(
+    task_id: str,
+    session: Session = Depends(get_session)
+):
+    """流式生成音频并返回进度"""
+    async def event_generator():
+        async for data in audio_generator_stream(task_id, session):
+            yield f"data: {data}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Access-Control-Allow-Origin": "*",
+        }
+    )
 
 
 @router.post("/{task_id}/screenshots/upload")
