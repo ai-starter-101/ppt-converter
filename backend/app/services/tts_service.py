@@ -4,6 +4,7 @@ import base64
 import hashlib
 import hmac
 import json
+import re
 import subprocess
 import time
 import urllib.parse
@@ -142,6 +143,58 @@ async def _generate_xfyun_audio(text: str, output_path: str) -> float:
         raise RuntimeError("需要安装 websockets 库才能使用讯飞 TTS: pip install websockets")
 
     return get_audio_duration(str(output_path))
+# 多音字词典 - TTS 容易读错的词
+HOMOPHONE_DICT = {
+    # 行 (háng vs xíng)
+    "换行符": "换航符",
+    "换行": "换航",
+    "换行符": "换航符",
+    "银行": "银航",
+    "行业": "航业",
+    "行列": "航列",
+    "行数": "航数",
+    "行高": "航高",
+    "行距": "航距",
+    "行号": "航号",
+    "行首": "航首",
+    "行尾": "航尾",
+    "行头": "航头",
+    "一行": "一航",
+    "每行": "每航",
+    "行内": "航内",
+    "行间": "航间",
+    "行与行": "航与航",
+    "C++": "C加加",
+}
+
+
+def fix_homophones(text: str) -> str:
+    """修复多音字，将容易读错的词替换为正确的读音"""
+    if not text:
+        return text
+
+    for wrong, correct in HOMOPHONE_DICT.items():
+        text = text.replace(wrong, correct)
+
+    # 修复数字+横杠+数字的问题，如 "1-1" 读成 "11"
+    # 模式：数字/字母 + - + 数字/字母
+    def replace_dash(match):
+        left = match.group(1)
+        right = match.group(2)
+        # 替换为 "左 杠 右" 的形式
+        return f"{left} 杠 {right}"
+
+    # 匹配形如 "1-1"、"A-1"、"2024-01"、"v1-2" 等
+    text = re.sub(r'([A-Za-z0-9]+)-([A-Za-z0-9]+)', replace_dash, text)
+
+    # 修复 "行+数字" → "航+数字"（如行6 → 航6）
+    text = re.sub(r'行(\d+)', r'航\1', text)
+
+    # 修复 "行+中文数字" → "航+中文数字"（如行一 → 航一）
+    chinese_nums = '一二三四五六七八九十百千万亿'
+    text = re.sub(r'行([' + chinese_nums + ']+)', r'航\1', text)
+
+    return text
 
 
 async def _generate_doubao_audio(text: str, output_path: str) -> float:
@@ -229,6 +282,9 @@ async def generate_audio(text: str, output_path: str) -> float:
     """
     if not text or not text.strip():
         raise ValueError("文本内容不能为空")
+
+    # 修复多音字问题
+    text = fix_homophones(text)
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)

@@ -703,7 +703,9 @@ async def synthesize_video(
     # 调用视频合成服务
     try:
         from app.services import synthesize_video
-        output_path = synthesize_video(task_id, task.file_path, str(audio_dir), screenshot_dir)
+        # 使用原始 PPT 文件名（不含扩展名）
+        original_filename = Path(task.filename).stem if task.filename else task_id
+        output_path = synthesize_video(task_id, task.file_path, str(audio_dir), screenshot_dir, original_filename)
 
         # 保存结果
         task.video_path = output_path

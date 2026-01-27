@@ -386,8 +386,12 @@ export const TaskPage = () => {
                       icon={<DownloadOutlined />}
                       onClick={() => {
                         const link = document.createElement('a');
+                        // 从 task.video_path 提取文件名
                         const videoFilename = task.video_path.split('/').pop();
-                        link.href = `/static/video/${id}/${videoFilename}`;
+                        // 使用后端完整 URL
+                        const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
+                        const baseUrl = apiBaseUrl.replace('/api', '');
+                        link.href = `${baseUrl}/static/video/${id}/${videoFilename}`;
                         link.download = videoFilename;
                         document.body.appendChild(link);
                         link.click();

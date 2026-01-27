@@ -8,7 +8,7 @@ from typing import Optional
 from app.config import settings
 
 
-def synthesize_video(task_id: str, ppt_path: str, audio_dir: str, screenshot_dir: Optional[str] = None) -> str:
+def synthesize_video(task_id: str, ppt_path: str, audio_dir: str, screenshot_dir: Optional[str] = None, filename: Optional[str] = None) -> str:
     """
     将 PPT 截图和音频合成为视频
 
@@ -19,6 +19,7 @@ def synthesize_video(task_id: str, ppt_path: str, audio_dir: str, screenshot_dir
         ppt_path: PPT 文件路径
         audio_dir: 音频文件目录
         screenshot_dir: 截图目录（可选，如果提供则优先使用）
+        filename: 视频文件名（可选，默认为 PPT 原始文件名）
 
     Returns:
         合成后的视频文件路径
@@ -31,7 +32,9 @@ def synthesize_video(task_id: str, ppt_path: str, audio_dir: str, screenshot_dir
     video_dir = settings.static_dir / "video" / task_id
     video_dir.mkdir(parents=True, exist_ok=True)
 
-    output_path = video_dir / f"{path.stem}.mp4"
+    # 使用传入的文件名或 PPT 原始文件名
+    video_name = filename or path.stem
+    output_path = video_dir / f"{video_name}.mp4"
 
     # 检查音频文件（按页码数字排序）
     all_audio = list(Path(audio_dir).glob("page_*.mp3"))
@@ -196,11 +199,17 @@ def _create_video_with_ffmpeg(image_files: list, audio_files: list, output_path:
 
             # 构建缩放滤镜
             if img_width > 1920 or img_height > 1080:
-                scale_filter = "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2"
+                scale_filter = "[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2[v]"
             elif img_width < 1280:
-                scale_filter = f"scale={img_width}:{img_height}"
+                scale_filter = f"[0:v]scale={img_width}:{img_height}[v]"
             else:
-                scale_filter = f"scale={img_width}:{img_height}"
+                scale_filter = f"[0:v]scale={img_width}:{img_height}[v]"
+
+            # 音频淡入淡出滤镜
+            fade_filter = f"[1:a]afade=t=in:ss=0:d=0.05,afade=t=out:st={duration - 0.05}:d=0.05[a]"
+
+            # 合并滤镜
+            filter_complex = f"{scale_filter};{fade_filter}"
 
             cmd = [
                 "ffmpeg", "-y",
@@ -208,9 +217,9 @@ def _create_video_with_ffmpeg(image_files: list, audio_files: list, output_path:
                 "-t", str(duration),
                 "-i", str(img_file),
                 "-i", str(audio_file),
-                "-vf", scale_filter,
-                "-map", "0:v",  # 映射第一路视频流（图片）
-                "-map", "1:a",  # 映射第二路音频流
+                "-filter_complex", filter_complex,
+                "-map", "[v]",  # 映射缩放后的视频流
+                "-map", "[a]",  # 映射处理后的音频流
                 "-c:v", "libx264",
                 "-preset", "fast",
                 "-crf", "22",
@@ -301,22 +310,26 @@ def _create_video_simple(image_files: list, audio_files: list, output_path: str)
             segment_path = os.path.join(temp_dir, f"seg_{i}.mp4")
             duration = audio_durations[i] if i < len(audio_durations) else 5.0
 
+            # 构建滤镜
+            scale_filter = f"[0:v]scale={img_width}:{img_height}[v]"
+            fade_filter = f"[1:a]afade=t=in:ss=0:d=0.05,afade=t=out:st={duration - 0.05}:d=0.05[a]"
+            filter_complex = f"{scale_filter};{fade_filter}"
+
             cmd = [
                 "ffmpeg", "-y",
                 "-loop", "1",
                 "-t", str(duration),
                 "-i", str(img_file),
                 "-i", str(audio_file),
-                "-vf", f"scale={img_width}:{img_height}",
-                "-map", "0:v",  # 映射视频
-                "-map", "1:a",  # 映射音频
+                "-filter_complex", filter_complex,
+                "-map", "[v]",  # 映射缩放后的视频流
+                "-map", "[a]",  # 映射处理后的音频流
                 "-c:v", "libx264",
                 "-preset", "fast",
                 "-crf", "23",
                 "-c:a", "aac",
                 "-b:a", "192k",
                 "-movflags", "+faststart",
-                "-shortest",
                 "-pix_fmt", "yuv420p",
                 segment_path
             ]
