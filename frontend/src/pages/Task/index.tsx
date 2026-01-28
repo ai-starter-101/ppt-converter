@@ -43,6 +43,13 @@ export const TaskPage = () => {
   // 刷新幻灯片数据
   const refreshSlides = () => {
     queryClient.invalidateQueries({ queryKey: ['slides', id] });
+    queryClient.invalidateQueries({ queryKey: ['task', id] });
+  };
+
+  // 强制刷新（清除缓存后重新获取）
+  const forceRefresh = () => {
+    queryClient.clear();
+    window.location.reload();
   };
 
   // 先获取任务基本信息
@@ -132,6 +139,30 @@ export const TaskPage = () => {
       message.error(error.message || '视频合成失败');
     },
   });
+
+  // 检查是否可以合成视频
+  const canSynthesizeVideo = () => {
+    // 检查是否有上传的截图
+    const hasScreenshots = slides.some((s: SlideData) => s.screenshot);
+    if (!hasScreenshots) {
+      message.warning('请先上传 PPT 截图后再合成视频');
+      return false;
+    }
+    // 检查音频是否全部生成
+    const audioGeneratedCount = slides.filter((s: SlideData) => s.audio).length;
+    if (audioGeneratedCount < slides.length) {
+      message.warning('请先生成所有页面的音频');
+      return false;
+    }
+    return true;
+  };
+
+  // 处理合成视频（带截图检测）
+  const handleSynthesizeVideo = () => {
+    if (canSynthesizeVideo()) {
+      synthesizeVideoMutation.mutate();
+    }
+  };
 
   // 上传截图 mutation
   const uploadScreenshotsMutation = useMutation({
@@ -311,6 +342,12 @@ export const TaskPage = () => {
         <Card style={{ marginBottom: 12, flexShrink: 0 }}>
           <Flex justify="space-between" align="center" wrap gap={12}>
             <Steps current={currentStep} items={steps} size="small" style={{ flex: 1, minWidth: 300 }} />
+            {/* 调试信息 */}
+            <Button size="small" icon={<SyncOutlined />} onClick={forceRefresh}>刷新数据</Button>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              幻灯片: {slides.length} | 音频: {audioGeneratedCount} | 截图: {slides.filter(s => s.screenshot).length}
+              | 状态: {task?.status} | 步骤: {currentStep}
+            </Text>
             <Space wrap>
               {/* 步骤1操作 */}
               {currentStep === 1 && (
@@ -366,7 +403,7 @@ export const TaskPage = () => {
                     <Button
                       type="primary"
                       icon={<VideoCameraOutlined />}
-                      onClick={() => synthesizeVideoMutation.mutate()}
+                      onClick={handleSynthesizeVideo}
                       loading={synthesizeVideoMutation.isPending}
                       disabled={audioGeneratedCount < slides.length}
                     >
@@ -375,7 +412,7 @@ export const TaskPage = () => {
                   )}
                   <Button
                     icon={<ReloadOutlined spin={synthesizeVideoMutation.isPending} />}
-                    onClick={() => synthesizeVideoMutation.mutate()}
+                    onClick={handleSynthesizeVideo}
                     loading={synthesizeVideoMutation.isPending}
                     disabled={audioGeneratedCount < slides.length}
                   >

@@ -39,6 +39,7 @@ class Settings:
     doubao_app_id: str = os.getenv("DOUBAO_APP_ID", "")
     doubao_access_token: str = os.getenv("DOUBAO_ACCESS_TOKEN", "")
     doubao_cluster: str = os.getenv("DOUBAO_CLUSTER", "volcano_tts")
+    doubao_resource_id: str = os.getenv("DOUBAO_RESOURCE_ID", "volc.service_type.10029")
 
     # Paths - 转为绝对路径
     @property

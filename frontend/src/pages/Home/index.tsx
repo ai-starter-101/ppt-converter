@@ -28,6 +28,7 @@ const getProgress = (status: TaskStatus): number => {
     case 'processing': return 50;
     case 'script_ready': return 75;
     case 'audio_ready': return 100;
+    case 'video_ready': return 100;
     case 'failed': return 100;
     default: return 0;
   }

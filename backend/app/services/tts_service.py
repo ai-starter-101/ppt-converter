@@ -4,6 +4,7 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import re
 import subprocess
 import time
@@ -14,7 +15,21 @@ import edge_tts
 import httpx
 from app.config import settings
 
-# 尝试导入 pydub
+logger = logging.getLogger(__name__)
+
+# 导入火山引擎双向TTS协议
+from app.services.volc_protocol import (
+    start_connection,
+    finish_connection,
+    start_session,
+    finish_session,
+    task_request,
+    wait_for_event,
+    receive_message,
+    get_resource_id,
+    MsgType,
+    EventType,
+)
 try:
     from pydub import AudioSegment
     PYDUB_AVAILABLE = True
@@ -205,14 +220,18 @@ async def _generate_doubao_audio(text: str, output_path: str) -> float:
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # 火山引擎 TTS API
+    # 火山引擎 TTS API 
     url = "https://openspeech.bytedance.com/api/v1/tts"
+    # url = "https://openspeech.bytedance.com/api/v3/tts/unidirectional"
 
     # 生成唯一请求 ID
     import uuid
     reqid = str(uuid.uuid4())
 
-    # 请求体
+    # 获取 voice_type（优先使用配置，否则使用豆包2.0默认音色）
+    voice_type = settings.tts_voice if settings.tts_voice else "zh_female_shuangkuaisisi_emo_v2_mars_bigtts"
+
+    # 请求体 
     payload = {
         "app": {
             "appid": settings.doubao_app_id,
@@ -220,17 +239,18 @@ async def _generate_doubao_audio(text: str, output_path: str) -> float:
             "cluster": settings.doubao_cluster,
         },
         "user": {
-            "uid": settings.doubao_app_id  # 使用 appid 作为 uid
+            "uid": settings.doubao_app_id
         },
         "audio": {
-            "voice_type": settings.tts_voice if settings.tts_voice else "zh_female_vv_venus_mars_bigtts",
+            "voice_type": voice_type,
             "encoding": "mp3",
             "speed_ratio": 1.0,
+            "volume_ratio": 1.0,
         },
         "request": {
             "reqid": reqid,
             "text": text,
-            "operation": "query",  # HTTP 方式只能用 query
+            "operation": "query",
         }
     }
 
@@ -239,9 +259,13 @@ async def _generate_doubao_audio(text: str, output_path: str) -> float:
         "Content-Type": "application/json"
     }
 
-    async with httpx.AsyncClient() as client:
-        response = await client.post(url, headers=headers, json=payload, timeout=60.0)
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        logger.info(f"豆包 TTS 请求: text={text[:20]}..., voice={voice_type}")
+        response = await client.post(url, headers=headers, json=payload)
+        logger.info(f"豆包 TTS 响应: status={response.status_code}")
 
+        if response.status_code == 429:
+            raise RuntimeError("豆包 TTS 请求过于频繁 (429)，请稍后再试")
         if response.status_code != 200:
             raise RuntimeError(f"豆包 TTS 请求失败: {response.status_code} - {response.text}")
 
@@ -251,7 +275,16 @@ async def _generate_doubao_audio(text: str, output_path: str) -> float:
         code = result.get("code", -1)
         if code != 3000:
             message = result.get("message", "未知错误")
-            raise RuntimeError(f"豆包 TTS 失败 (code={code}): {message}")
+            # 常见错误码
+            error_messages = {
+                3001: "配额不足，请充值",
+                3002: "参数错误",
+                3003: "鉴权失败",
+                3004: "请求过于频繁",
+                3005: "服务内部错误",
+            }
+            hint = error_messages.get(code, "")
+            raise RuntimeError(f"豆包 TTS 失败 (code={code}): {message} {hint}")
 
         # 解码音频数据
         audio_data = base64.b64decode(result["data"])
@@ -263,6 +296,145 @@ async def _generate_doubao_audio(text: str, output_path: str) -> float:
         return float(duration_ms) / 1000  # 转换为秒
 
 
+async def _generate_doubao_bidir_audio(text: str, output_path: str) -> float:
+    """使用豆包 TTS (火山引擎双向TTS) 生成音频 - 优化版
+
+    优化点：
+    - 按句子批量发送（不逐字发送）
+    - 添加超时控制
+    - 增强错误处理和日志
+    """
+    if not settings.doubao_app_id or not settings.doubao_access_token:
+        raise ValueError("豆包 TTS 配置不完整，需要设置 DOUBAO_APP_ID 和 DOUBAO_ACCESS_TOKEN")
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    import websockets
+    import uuid
+
+    endpoint = "wss://openspeech.bytedance.com/api/v3/tts/bidirection"
+    connect_id = str(uuid.uuid4())
+
+    # 音色配置
+    voice_type = settings.tts_voice if settings.tts_voice else "zh_female_shuangkuaisisi_emo_v2_mars_bigtts"
+
+    headers = {
+        "X-Api-App-Key": settings.doubao_app_id,
+        "X-Api-Access-Key": settings.doubao_access_token,
+        "X-Api-Resource-Id": settings.doubao_resource_id or get_resource_id(voice_type),
+        "X-Api-Connect-Id": connect_id,
+    }
+
+    logger.info(f"Connecting to Volcano TTS: {endpoint}")
+    logger.info(f"Headers: appid={settings.doubao_app_id[:8] if settings.doubao_app_id else 'None'}...")
+
+    try:
+        # 30秒超时连接
+        async with websockets.connect(
+            endpoint, additional_headers=headers, max_size=10 * 1024 * 1024,
+            open_timeout=30, close_timeout=10
+        ) as websocket:
+            logid = websocket.response.headers.get('x-tt-logid', 'unknown')
+            logger.info(f"Connected to Volcano TTS, logid: {logid}")
+            # 1. 开始连接 - 10秒超时
+            await asyncio.wait_for(start_connection(websocket), timeout=10)
+            await asyncio.wait_for(
+                wait_for_event(websocket, MsgType.FullServerResponse, EventType.ConnectionStarted),
+                timeout=10
+            )
+
+            # 2. 分割文本为句子
+            sentences = [s.strip() + "。" for s in text.split("。") if s.strip()]
+            if not sentences:
+                sentences = [text]
+
+            audio_data = bytearray()
+
+            # 3. 会话基础请求
+            base_request = {
+                "user": {"uid": settings.doubao_app_id},
+                "namespace": "BidirectionalTTS",
+                "req_params": {
+                    "speaker": voice_type,
+                    "audio_params": {
+                        "format": "mp3",
+                        "sample_rate": 24000,
+                        "enable_timestamp": True,
+                    },
+                    "additions": json.dumps({"disable_markdown_filter": False}),
+                },
+            }
+
+            # 4. 处理每个句子
+            for i, sentence in enumerate(sentences):
+                session_id = str(uuid.uuid4())
+
+                # 4.1 开始会话 - 10秒超时
+                start_session_request = base_request.copy()
+                start_session_request["event"] = EventType.StartSession
+                await asyncio.wait_for(
+                    start_session(websocket, json.dumps(start_session_request).encode(), session_id),
+                    timeout=10
+                )
+                await asyncio.wait_for(
+                    wait_for_event(websocket, MsgType.FullServerResponse, EventType.SessionStarted),
+                    timeout=10
+                )
+
+                # 4.2 发送整句文本
+                synthesis_request = base_request.copy()
+                synthesis_request["event"] = EventType.TaskRequest
+                synthesis_request["req_params"]["text"] = sentence
+                await task_request(websocket, json.dumps(synthesis_request).encode(), session_id)
+
+                # 4.3 结束会话
+                await finish_session(websocket, session_id)
+
+                # 4.4 接收音频数据 - 30秒超时
+                msg_count = 0
+                while True:
+                    msg = await asyncio.wait_for(receive_message(websocket), timeout=30)
+                    msg_count += 1
+
+                    if msg.type == MsgType.FullServerResponse:
+                        if msg.event == EventType.SessionFinished:
+                            break
+                    elif msg.type == MsgType.AudioOnlyServer:
+                        audio_data.extend(msg.payload)
+
+                logger.debug(f"Sentence {i+1}/{len(sentences)} completed, received {msg_count} messages")
+
+            # 5. 结束连接
+            await asyncio.wait_for(finish_connection(websocket), timeout=10)
+            await asyncio.wait_for(
+                wait_for_event(websocket, MsgType.FullServerResponse, EventType.ConnectionFinished),
+                timeout=10
+            )
+
+            # 保存音频文件
+            if audio_data:
+                with open(output_path, "wb") as f:
+                    f.write(audio_data)
+                logger.debug(f"Audio saved: {len(audio_data)} bytes to {output_path}")
+            else:
+                raise RuntimeError("未收到音频数据")
+
+    except asyncio.TimeoutError:
+        logger.error("Volcano TTS timeout")
+        raise RuntimeError("火山引擎 TTS 请求超时，请检查网络连接或代理设置")
+    except websockets.exceptions.InvalidStatusCode as e:
+        logger.error(f"Volcano TTS connection failed: status={e.status_code}")
+        raise RuntimeError(f"火山引擎 TTS 连接失败 (status={e.status_code}): {e}")
+    except Exception as e:
+        logger.error(f"Volcano TTS error: {type(e).__name__}: {e}")
+        raise RuntimeError(f"火山引擎 TTS 失败: {type(e).__name__}: {str(e)}")
+
+    # 获取音频时长
+    duration = get_audio_duration(str(output_path))
+    return duration
+
+
 async def generate_audio(text: str, output_path: str) -> float:
     """
     生成音频文件
@@ -271,7 +443,8 @@ async def generate_audio(text: str, output_path: str) -> float:
     - "edge": Edge TTS (在线，音质好)
     - "offline": macOS say 命令 (离线，使用 Ting-Ting 语音)
     - "xfyun": 讯飞 TTS (在线，多种语音)
-    - "doubao": 豆包 TTS (在线)
+    - "doubao": 豆包 TTS (在线，单向HTTP)
+    - "doubao_bidir": 豆包 TTS (火山引擎双向TTS，WebSocket实时流)
 
     Args:
         text: 要转换的文本
@@ -301,8 +474,11 @@ async def generate_audio(text: str, output_path: str) -> float:
     elif tts_engine == 'xfyun':
         # 使用讯飞 TTS
         return await _generate_xfyun_audio(text, str(output_path))
+    elif tts_engine == 'doubao_bidir':
+        # 使用豆包双向TTS (火山引擎WebSocket)
+        return await _generate_doubao_bidir_audio(text, str(output_path))
     elif tts_engine == 'doubao':
-        # 使用豆包 TTS
+        # 使用豆包单向HTTP TTS
         return await _generate_doubao_audio(text, str(output_path))
     else:
         # 默认使用 Edge TTS，使用代理 7897 (SOCKS5)
@@ -318,15 +494,17 @@ async def generate_audio_per_page(
     slides_script: List[Dict],
     audio_dir: str,
     progress_callback=None,
-    existing_audios: List[Dict] = None
+    existing_audios: List[Dict] = None,
+    max_concurrent: int = 5
 ) -> List[Dict]:
-    """按页生成音频文件
+    """按页生成音频文件（支持并发）
 
     Args:
         slides_script: 脚本列表
         audio_dir: 音频输出目录
         progress_callback: 进度回调函数，接收 (current, total, page_num) 参数
         existing_audios: 已有的音频信息列表，用于跳过已成功的页面
+        max_concurrent: 最大并发数，默认5路
     """
     Path(audio_dir).mkdir(parents=True, exist_ok=True)
     results = []
@@ -349,50 +527,60 @@ async def generate_audio_per_page(
             progress_callback(total, total, None)
         return existing_audios or []
 
+    # 添加已成功的结果到最终结果
+    for audio in (existing_audios or []):
+        if audio["page_num"] in successful_pages:
+            results.append(audio)
+
+    # 并发生成音频
+    semaphore = asyncio.Semaphore(max_concurrent)
     generated_count = 0
+    count_lock = asyncio.Lock()
 
-    for idx, slide in enumerate(slides_script):
-        page_num = slide["page_num"]
-        script = slide.get("script", "")
+    async def generate_with_semaphore(slide: Dict) -> Dict:
+        """带并发控制的单页音频生成"""
+        async with semaphore:
+            page_num = slide["page_num"]
+            script = slide.get("script", "")
 
-        # 如果已有成功的结果，跳过
-        if page_num in successful_pages:
-            # 直接使用已有的结果
-            existing = next((a for a in (existing_audios or []) if a["page_num"] == page_num), None)
-            if existing:
-                results.append(existing)
-            continue
+            # 报告进度
+            nonlocal generated_count
+            async with count_lock:
+                generated_count += 1
+                if progress_callback:
+                    progress_callback(generated_count, generate_total, page_num)
 
-        # 报告进度（只计算需要生成的数量）
-        generated_count += 1
-        if progress_callback:
-            progress_callback(generated_count, generate_total, page_num)
+            if not script or script.strip() == "":
+                return {
+                    "page_num": page_num,
+                    "audio_path": None,
+                    "duration": 0
+                }
 
-        if not script or script.strip() == "":
-            results.append({
-                "page_num": page_num,
-                "audio_path": None,
-                "duration": 0
-            })
-            continue
+            audio_filename = f"page_{page_num}.mp3"
+            audio_path = Path(audio_dir) / audio_filename
 
-        audio_filename = f"page_{page_num}.mp3"
-        audio_path = Path(audio_dir) / audio_filename
+            try:
+                duration = await generate_audio(script, str(audio_path))
+                return {
+                    "page_num": page_num,
+                    "audio_path": str(audio_path),
+                    "duration": duration
+                }
+            except Exception as e:
+                return {
+                    "page_num": page_num,
+                    "audio_path": None,
+                    "duration": 0,
+                    "error": str(e)
+                }
 
-        try:
-            duration = await generate_audio(script, str(audio_path))
-            results.append({
-                "page_num": page_num,
-                "audio_path": str(audio_path),
-                "duration": duration
-            })
-        except Exception as e:
-            results.append({
-                "page_num": page_num,
-                "audio_path": None,
-                "duration": 0,
-                "error": str(e)
-            })
+    # 并发执行所有音频生成任务
+    tasks = [generate_with_semaphore(slide) for slide in scripts_to_generate]
+    results.extend(await asyncio.gather(*tasks))
+
+    # 按页码排序结果
+    results.sort(key=lambda x: x["page_num"])
 
     # 报告完成
     if progress_callback:

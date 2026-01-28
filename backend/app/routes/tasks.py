@@ -523,8 +523,11 @@ async def audio_generator_stream(task_id: str, session: Session):
 
     audio_dir = settings.audio_dir / task_id
 
-    # 进度回调
+    # 使用 asyncio.Queue 收集进度更新
+    progress_queue: asyncio.Queue = asyncio.Queue()
+
     async def progress_callback(current: int, total: int, page_num: Optional[int]):
+        """进度回调 - 发送到队列"""
         data = {
             "type": "progress",
             "current": current,
@@ -532,16 +535,31 @@ async def audio_generator_stream(task_id: str, session: Session):
             "percent": round(current / total * 100) if total > 0 else 100,
             "page_num": page_num
         }
-        yield json.dumps(data)
+        await progress_queue.put(data)
 
-    # 生成音频（跳过已成功的页面）
-    audio_results = await generate_audio_per_page(valid_scripts, str(audio_dir), progress_callback, existing_audios)
+    # 在后台运行音频生成，同时读取队列发送进度
+    async def run_generation():
+        nonlocal task
+        audio_results = await generate_audio_per_page(valid_scripts, str(audio_dir), progress_callback, existing_audios)
+        task.slides_audio = slides_to_json(audio_results)
+        task.status = "audio_ready"
+        session.commit()
+        await progress_queue.put({"type": "complete", "status": "audio_ready"})
 
-    task.slides_audio = slides_to_json(audio_results)
-    task.status = "audio_ready"
-    session.commit()
+    # 并发执行：生成音频 + 发送进度
+    generation_task = asyncio.create_task(run_generation())
 
-    yield json.dumps({"type": "complete", "status": "audio_ready"})
+    # 从队列读取并发送进度
+    while True:
+        try:
+            data = await asyncio.wait_for(progress_queue.get(), timeout=60)
+            yield json.dumps(data)
+            if data.get("type") == "complete":
+                break
+        except asyncio.TimeoutError:
+            break
+
+    await generation_task
 
 
 @router.get("/{task_id}/audio/generate-all/stream")
