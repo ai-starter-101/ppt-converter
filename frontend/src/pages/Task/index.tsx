@@ -19,6 +19,7 @@ import {
   FileAddOutlined,
   PictureOutlined,
   SyncOutlined,
+  AudioOutlined,
 } from '@ant-design/icons';
 import { getTask, getSlides, generateScripts, updateScript, generateSingleScript, generateAudio, getAudioUrl, uploadPPT, generateAllAudioStream, synthesizeVideo, uploadScreenshots } from '../../api/task';
 import type { SlideData } from '../../types';
@@ -548,6 +549,7 @@ export const TaskPage = () => {
 const SlideCard = ({ taskId, slide, onUpdate }: { taskId: string; slide: SlideData; onUpdate: () => void }) => {
   const [script, setScript] = useState(slide.script || '');
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
+  const scriptTextareaRef = useRef<HTMLTextAreaElement>(null);
 
   // 更新脚本 mutation
   const updateScriptMutation = useMutation({
@@ -729,6 +731,7 @@ const SlideCard = ({ taskId, slide, onUpdate }: { taskId: string; slide: SlideDa
           style={{ flex: 1, marginBottom: 12, display: 'flex', flexDirection: 'column' }}
         >
           <textarea
+            ref={scriptTextareaRef}
             value={script}
             onChange={(e) => setScript(e.target.value)}
             style={{
@@ -744,11 +747,68 @@ const SlideCard = ({ taskId, slide, onUpdate }: { taskId: string; slide: SlideDa
             }}
             placeholder="输入或生成讲解脚本..."
           />
-          <Flex justify="flex-end" style={{ marginTop: 12 }}>
+          {/* SSML 按钮组 */}
+          <Flex justify="space-between" align="center" style={{ marginTop: 8 }}>
+            <Space>
+              <Button
+                size="small"
+                type="button"
+                icon={<SoundOutlined />}
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  if (script.startsWith("<speak>") && script.endsWith("</speak>")) {
+                    // 移除 SSML 标记
+                    setScript(script.replace("<speak>", "").replace("</speak>", ""));
+                  } else {
+                    // 添加 SSML 标记
+                    setScript(`<speak>${script}</speak>`);
+                  }
+                }}
+              >
+                {script.startsWith("<speak>") && script.endsWith("</speak>") ? "取消 SSML" : "SSML"}
+              </Button>
+              <Button
+                size="small"
+                type="button"
+                icon={<AudioOutlined />}
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  const textarea = scriptTextareaRef.current;
+                  if (!textarea) return;
+
+                  const hasBreak = script.includes("<break");
+
+                  if (hasBreak) {
+                    // 删除所有 break 标签
+                    setScript(script.replace(/<break[^>]*\/>/g, "").trim());
+                  } else {
+                    // 在光标位置插入 break
+                    const start = textarea.selectionStart;
+                    const end = textarea.selectionEnd;
+                    const breakTag = "<break time=\"1s\"/>";
+                    const newScript = script.substring(0, start) + breakTag + script.substring(end);
+                    setScript(newScript);
+
+                    // 恢复光标位置
+                    setTimeout(() => {
+                      textarea.focus();
+                      textarea.setSelectionRange(start + breakTag.length, start + breakTag.length);
+                    }, 0);
+                  }
+                }}
+              >
+                {script.includes("<break") ? "取消 Break" : "Break"}
+              </Button>
+            </Space>
             <Button
               type="primary"
               icon={<SaveOutlined />}
-              onClick={handleSave}
+              onClick={(e) => {
+                e.preventDefault();
+                handleSave();
+              }}
               loading={updateScriptMutation.isPending}
               disabled={!script.trim()}
             >

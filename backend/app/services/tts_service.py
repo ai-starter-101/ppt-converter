@@ -220,7 +220,7 @@ async def _generate_doubao_audio(text: str, output_path: str) -> float:
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # 火山引擎 TTS API 
+    # 火山引擎 TTS API
     url = "https://openspeech.bytedance.com/api/v1/tts"
     # url = "https://openspeech.bytedance.com/api/v3/tts/unidirectional"
 
@@ -231,7 +231,10 @@ async def _generate_doubao_audio(text: str, output_path: str) -> float:
     # 获取 voice_type（优先使用配置，否则使用豆包2.0默认音色）
     voice_type = settings.tts_voice if settings.tts_voice else "zh_female_shuangkuaisisi_emo_v2_mars_bigtts"
 
-    # 请求体 
+    # 检测是否包含 SSML 标签
+    is_ssml = "<speak" in text or "<break" in text or "</speak>" in text
+
+    # 请求体
     payload = {
         "app": {
             "appid": settings.doubao_app_id,
@@ -251,6 +254,7 @@ async def _generate_doubao_audio(text: str, output_path: str) -> float:
             "reqid": reqid,
             "text": text,
             "operation": "query",
+            "text_type": "ssml" if is_ssml else "plain",  # SSML 支持
         }
     }
 
