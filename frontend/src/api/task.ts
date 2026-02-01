@@ -135,3 +135,12 @@ export const uploadScreenshots = async (id: string, files: File[]): Promise<{ ta
     headers: { 'Content-Type': 'multipart/form-data' },
   });
 };
+
+// 上传脚本文件
+export const uploadScript = async (id: string, file: File): Promise<{ task_id: string; scripts: { page_num: number; script: string }[]; slide_count: number; status: string }> => {
+  const formData = new FormData();
+  formData.append('file', file);
+  return apiClient.post(`/tasks/${id}/scripts/upload`, formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  });
+};

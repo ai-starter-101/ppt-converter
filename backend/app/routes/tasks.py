@@ -491,35 +491,39 @@ async def generate_all_audio(
     }
 
 
-async def audio_generator_stream(task_id: str, session: Session):
-    """生成音频并流式输出进度"""
-    task = session.get(Task, task_id)
-    if not task:
-        yield json.dumps({"error": "任务不存在"})
-        return
+async def audio_generator_stream(task_id: str):
+    """生成音频并流式输出进度 - 使用独立数据库连接"""
+    from app.database import async_session
 
-    if task.status not in ["uploaded", "script_ready"]:
-        yield json.dumps({"error": "请先上传 PPT 文件"})
-        return
+    # 使用独立数据库会话进行验证
+    async with async_session() as session:
+        task = session.get(Task, task_id)
+        if not task:
+            yield json.dumps({"error": "任务不存在"})
+            return
 
-    scripts = parse_slides_json(task.slides_script)
-    slides_content = parse_slides_json(task.slides_content)
+        if task.status not in ["uploaded", "script_ready"]:
+            yield json.dumps({"error": "请先上传 PPT 文件"})
+            return
 
-    # 如果没有脚本，使用 PPT 内容作为默认脚本
-    if not scripts:
-        scripts = [{"page_num": s["page_num"], "script": s["content"]} for s in slides_content]
-        task.slides_script = slides_to_json(scripts)
-        session.commit()
-        yield json.dumps({"type": "script_saved", "message": "已使用 PPT 内容作为默认脚本"})
+        scripts = parse_slides_json(task.slides_script)
+        slides_content = parse_slides_json(task.slides_content)
 
-    valid_scripts = [s for s in scripts if s.get("script", "").strip()]
+        # 如果没有脚本，使用 PPT 内容作为默认脚本
+        if not scripts:
+            scripts = [{"page_num": s["page_num"], "script": s["content"]} for s in slides_content]
+            task.slides_script = slides_to_json(scripts)
+            await session.commit()
+            yield json.dumps({"type": "script_saved", "message": "已使用 PPT 内容作为默认脚本"})
 
-    if not valid_scripts:
-        yield json.dumps({"error": "没有可生成音频的脚本"})
-        return
+        valid_scripts = [s for s in scripts if s.get("script", "").strip()]
 
-    # 获取已有的音频信息，跳过已成功的页面
-    existing_audios = parse_slides_json(task.slides_audio)
+        if not valid_scripts:
+            yield json.dumps({"error": "没有可生成音频的脚本"})
+            return
+
+        # 获取已有的音频信息，跳过已成功的页面
+        existing_audios = parse_slides_json(task.slides_audio)
 
     audio_dir = settings.audio_dir / task_id
 
@@ -539,12 +543,20 @@ async def audio_generator_stream(task_id: str, session: Session):
 
     # 在后台运行音频生成，同时读取队列发送进度
     async def run_generation():
-        nonlocal task
-        audio_results = await generate_audio_per_page(valid_scripts, str(audio_dir), progress_callback, existing_audios)
-        task.slides_audio = slides_to_json(audio_results)
-        task.status = "audio_ready"
-        session.commit()
-        await progress_queue.put({"type": "complete", "status": "audio_ready"})
+        # 在新任务中需要重新获取 session 和 task
+        async with async_session() as inner_session:
+            inner_task = await inner_session.get(Task, task_id)
+            if not inner_task:
+                await progress_queue.put({"type": "error", "error": "任务不存在"})
+                return
+
+            audio_results = await generate_audio_per_page(
+                valid_scripts, str(audio_dir), progress_callback, existing_audios
+            )
+            inner_task.slides_audio = slides_to_json(audio_results)
+            inner_task.status = "audio_ready"
+            await inner_session.commit()
+            await progress_queue.put({"type": "complete", "status": "audio_ready"})
 
     # 并发执行：生成音频 + 发送进度
     generation_task = asyncio.create_task(run_generation())
@@ -563,13 +575,10 @@ async def audio_generator_stream(task_id: str, session: Session):
 
 
 @router.get("/{task_id}/audio/generate-all/stream")
-async def stream_audio_generation(
-    task_id: str,
-    session: Session = Depends(get_session)
-):
+async def stream_audio_generation(task_id: str):
     """流式生成音频并返回进度"""
     async def event_generator():
-        async for data in audio_generator_stream(task_id, session):
+        async for data in audio_generator_stream(task_id):
             yield f"data: {data}\n\n"
 
     return StreamingResponse(
@@ -677,6 +686,111 @@ async def upload_screenshots(
     return {
         "task_id": task_id,
         "screenshots": uploaded,
+        "status": task.status
+    }
+
+
+@router.post("/{task_id}/scripts/upload")
+async def upload_script(
+    task_id: str,
+    file: UploadFile = File(...),
+    session: Session = Depends(get_session)
+) -> dict:
+    """
+    上传脚本文件
+
+    支持两种格式：
+    1. 文本格式：按行分割，每行对应一页幻灯片的脚本
+    2. JSONL 格式：每行一个 JSON 对象，格式如 {"page": 1, "title": "xxx", "script": "content"}
+    """
+    task = session.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="文件名不能为空")
+
+    # 验证文件类型
+    file_ext = Path(file.filename).suffix.lower()
+    if file_ext not in ['.txt', '.md', '.text', '.jsonl']:
+        raise HTTPException(status_code=400, detail="只支持 .txt、.md、.jsonl 格式的脚本文件")
+
+    # 读取文件内容
+    content = await file.read()
+    try:
+        text_content = content.decode('utf-8')
+    except UnicodeDecodeError:
+        raise HTTPException(status_code=400, detail="文件编码不支持，请使用 UTF-8 编码")
+
+    # 获取幻灯片数量
+    slides = parse_slides_json(task.slides_content)
+    if not slides:
+        raise HTTPException(status_code=400, detail="请先上传 PPT 文件")
+
+    slide_count = len(slides)
+    scripts = []
+
+    # 尝试解析 JSONL 格式
+    is_jsonl = False
+    try:
+        lines = text_content.strip().split('\n')
+        jsonl_data = []
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            obj = json.loads(line)
+            if "script" in obj:
+                jsonl_data.append(obj)
+        # 如果成功解析出有效数据，认为是 JSONL 格式
+        if jsonl_data and all("page" in obj or "page_num" in obj for obj in jsonl_data):
+            is_jsonl = True
+    except json.JSONDecodeError:
+        is_jsonl = False
+
+    if is_jsonl:
+        # JSONL 格式：按 page/page_num 字段匹配
+        for i in range(slide_count):
+            page_num = slides[i]["page_num"]
+            # 查找对应的脚本
+            script_obj = next(
+                (obj for obj in jsonl_data if obj.get("page") == page_num or obj.get("page_num") == page_num),
+                None
+            )
+            script_content = script_obj.get("script", "") if script_obj else ""
+            scripts.append({
+                "page_num": page_num,
+                "script": script_content
+            })
+    else:
+        # 文本格式：按行分割，每行对应一页
+        lines = text_content.split('\n')
+        # 过滤空行
+        non_empty_lines = [line.strip() for line in lines if line.strip()]
+
+        # 为每页分配脚本
+        for i in range(slide_count):
+            page_num = slides[i]["page_num"]
+            if i < len(non_empty_lines):
+                script_content = non_empty_lines[i]
+            else:
+                script_content = ""
+
+            scripts.append({
+                "page_num": page_num,
+                "script": script_content
+            })
+
+    # 保存到数据库
+    task.slides_script = slides_to_json(scripts)
+    task.status = "script_ready"
+    session.commit()
+
+    return {
+        "task_id": task_id,
+        "scripts": scripts,
+        "slide_count": slide_count,
+        "format": "jsonl" if is_jsonl else "text",
         "status": task.status
     }
 

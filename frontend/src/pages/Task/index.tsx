@@ -21,7 +21,7 @@ import {
   SyncOutlined,
   AudioOutlined,
 } from '@ant-design/icons';
-import { getTask, getSlides, generateScripts, updateScript, generateSingleScript, generateAudio, getAudioUrl, uploadPPT, generateAllAudioStream, synthesizeVideo, uploadScreenshots } from '../../api/task';
+import { getTask, getSlides, generateScripts, updateScript, generateSingleScript, generateAudio, getAudioUrl, uploadPPT, generateAllAudioStream, synthesizeVideo, uploadScreenshots, uploadScript } from '../../api/task';
 import type { SlideData } from '../../types';
 import { getStepIndex } from '../../store/useTaskStore';
 
@@ -70,6 +70,7 @@ export const TaskPage = () => {
   const isLoading = taskLoading || slidesLoading;
   const [uploading, setUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const scriptFileInputRef = useRef<HTMLInputElement>(null);
   const [currentSlide, setCurrentSlide] = useState(0);
 
   // 进度弹窗状态
@@ -182,6 +183,38 @@ export const TaskPage = () => {
   const handleScreenshotsUpload = (fileList: File[]) => {
     if (fileList.length === 0) return;
     uploadScreenshotsMutation.mutate(fileList);
+  };
+
+  // 上传脚本 mutation
+  const uploadScriptMutation = useMutation({
+    mutationFn: (file: File) => uploadScript(id!, file),
+    onSuccess: () => {
+      message.success('脚本上传成功');
+      refreshSlides();
+    },
+    onError: (error: Error) => {
+      message.error(error.message || '脚本上传失败');
+    },
+  });
+
+  // 处理脚本上传
+  const handleScriptUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      const ext = file.name.split('.').pop()?.toLowerCase();
+      if (!['txt', 'md', 'text', 'jsonl'].includes(ext || '')) {
+        message.error('只支持 .txt、.md、.jsonl 格式的脚本文件');
+        return;
+      }
+      uploadScriptMutation.mutate(file);
+    }
+    // 清空 input 以便重复上传同一文件
+    e.target.value = '';
+  };
+
+  // 触发脚本上传
+  const triggerScriptUpload = () => {
+    scriptFileInputRef.current?.click();
   };
 
   // 上传 PPT mutation
@@ -353,6 +386,21 @@ export const TaskPage = () => {
               {/* 步骤1操作 */}
               {currentStep === 1 && (
                 <>
+                  {/* 上传脚本按钮 */}
+                  <input
+                    type="file"
+                    ref={scriptFileInputRef}
+                    accept=".txt,.md,.text,.jsonl"
+                    style={{ display: 'none' }}
+                    onChange={handleScriptUpload}
+                  />
+                  <Button
+                    icon={<FileAddOutlined />}
+                    onClick={triggerScriptUpload}
+                    loading={uploadScriptMutation.isPending}
+                  >
+                    上传脚本
+                  </Button>
                   <Button
                     type="primary"
                     icon={<FileTextOutlined />}
@@ -550,6 +598,13 @@ const SlideCard = ({ taskId, slide, onUpdate }: { taskId: string; slide: SlideDa
   const [script, setScript] = useState(slide.script || '');
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const scriptTextareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // 监听 slide.script 变化，自动更新本地 state
+  useEffect(() => {
+    if (slide.script !== undefined) {
+      setScript(slide.script);
+    }
+  }, [slide.script]);
 
   // 更新脚本 mutation
   const updateScriptMutation = useMutation({

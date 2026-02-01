@@ -264,22 +264,21 @@ async def _generate_doubao_audio(text: str, output_path: str) -> float:
     }
 
     async with httpx.AsyncClient(timeout=120.0) as client:
-        logger.info(f"豆包 TTS 请求: text={text[:20]}..., voice={voice_type}")
+        logger.info(f"豆包 TTS 请求: text={text[:30]}..., voice={voice_type}")
         response = await client.post(url, headers=headers, json=payload)
-        logger.info(f"豆包 TTS 响应: status={response.status_code}")
+        logger.info(f"豆包 TTS 响应: status={response.status_code}, body={response.text[:200]}")
 
         if response.status_code == 429:
-            raise RuntimeError("豆包 TTS 请求过于频繁 (429)，请稍后再试")
+            raise RuntimeError(f"豆包 TTS 限流 (HTTP 429)。响应: {response.text[:200]}")
+
         if response.status_code != 200:
-            raise RuntimeError(f"豆包 TTS 请求失败: {response.status_code} - {response.text}")
+            raise RuntimeError(f"豆包 TTS 请求失败: HTTP {response.status_code} - {response.text[:200]}")
 
         result = response.json()
-
-        # 检查返回码
         code = result.get("code", -1)
+        message = result.get("message", "")
+
         if code != 3000:
-            message = result.get("message", "未知错误")
-            # 常见错误码
             error_messages = {
                 3001: "配额不足，请充值",
                 3002: "参数错误",
@@ -499,7 +498,7 @@ async def generate_audio_per_page(
     audio_dir: str,
     progress_callback=None,
     existing_audios: List[Dict] = None,
-    max_concurrent: int = 5
+    max_concurrent: int = 3
 ) -> List[Dict]:
     """按页生成音频文件（支持并发）
 
