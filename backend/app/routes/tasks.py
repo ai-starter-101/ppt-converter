@@ -497,7 +497,7 @@ async def audio_generator_stream(task_id: str):
 
     # 使用独立数据库会话进行验证
     async with async_session() as session:
-        task = session.get(Task, task_id)
+        task = await session.get(Task, task_id)
         if not task:
             yield json.dumps({"error": "任务不存在"})
             return
@@ -561,14 +561,14 @@ async def audio_generator_stream(task_id: str):
     # 并发执行：生成音频 + 发送进度
     generation_task = asyncio.create_task(run_generation())
 
-    # 从队列读取并发送进度
+    # 从队列读取并发送进度（无超时限制）
     while True:
         try:
-            data = await asyncio.wait_for(progress_queue.get(), timeout=60)
+            data = await progress_queue.get()
             yield json.dumps(data)
             if data.get("type") == "complete":
                 break
-        except asyncio.TimeoutError:
+        except asyncio.CancelledError:
             break
 
     await generation_task
