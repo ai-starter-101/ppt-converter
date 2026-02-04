@@ -41,12 +41,6 @@ export const TaskPage = () => {
   const queryClient = useQueryClient();
   const carouselRef = useRef<CarouselRef>(null);
 
-  // 刷新幻灯片数据
-  const refreshSlides = () => {
-    queryClient.invalidateQueries({ queryKey: ['slides', id] });
-    queryClient.invalidateQueries({ queryKey: ['task', id] });
-  };
-
   // 强制刷新（清除缓存后重新获取）
   const forceRefresh = () => {
     queryClient.clear();
@@ -92,6 +86,16 @@ export const TaskPage = () => {
       message.error(error.message || '脚本生成失败');
     },
   });
+
+  // 刷新幻灯片数据
+  const refreshSlides = () => {
+    // 使用 refetch 强制重新获取数据
+    queryClient.invalidateQueries({ queryKey: ['slides', id] });
+    queryClient.invalidateQueries({ queryKey: ['task', id] });
+    // 同时强制重新获取当前数据
+    queryClient.refetchQueries({ queryKey: ['slides', id] });
+    queryClient.refetchQueries({ queryKey: ['task', id] });
+  };
 
   // 流式生成所有音频
   const handleGenerateAllAudio = async () => {
@@ -150,10 +154,13 @@ export const TaskPage = () => {
       message.warning('请先上传 PPT 截图后再合成视频');
       return false;
     }
-    // 检查音频是否全部生成
-    const audioGeneratedCount = slides.filter((s: SlideData) => s.audio).length;
+    // 检查音频是否全部生成（需要有效的 audio_path）
+    const audioGeneratedCount = slides.filter((s: SlideData) => s.audio?.audio_path).length;
     if (audioGeneratedCount < slides.length) {
-      message.warning('请先生成所有页面的音频');
+      const missingPages = slides
+        .filter((s: SlideData) => !s.audio?.audio_path)
+        .map((s: SlideData) => s.page_num);
+      message.warning(`请先生成所有页面的音频，缺失页面: ${missingPages.join(', ')}`);
       return false;
     }
     return true;
@@ -347,8 +354,12 @@ export const TaskPage = () => {
   const slides = taskDetail?.slides || [];
   const currentSlideData = slides[currentSlide];
 
-  // 计算进度
-  const audioGeneratedCount = slides.filter(s => s.audio).length;
+  // 调试：查看音频数据结构
+  console.log('slides data:', JSON.stringify(slides, null, 2));
+
+  // 计算进度（只统计有有效音频路径的）
+  const audioGeneratedCount = slides.filter(s => s.audio?.audio_path).length;
+  console.log('audioGeneratedCount:', audioGeneratedCount, 'slides.length:', slides.length, 'disabled:', audioGeneratedCount < slides.length);
   const audioProgress = slides.length > 0 ? Math.round((audioGeneratedCount / slides.length) * 100) : 0;
 
   // 检查是否已合成视频
@@ -601,10 +612,11 @@ const SlideCard = ({ taskId, slide, onUpdate }: { taskId: string; slide: SlideDa
 
   // 监听 slide.script 变化，自动更新本地 state
   useEffect(() => {
+    console.log('slide.script changed:', slide.script?.substring(0, 50), 'page:', slide.page_num);
     if (slide.script !== undefined) {
       setScript(slide.script);
     }
-  }, [slide.script]);
+  }, [slide.script, slide.page_num]);
 
   // 更新脚本 mutation
   const updateScriptMutation = useMutation({

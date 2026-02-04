@@ -543,20 +543,24 @@ async def audio_generator_stream(task_id: str):
 
     # 在后台运行音频生成，同时读取队列发送进度
     async def run_generation():
-        # 在新任务中需要重新获取 session 和 task
-        async with async_session() as inner_session:
-            inner_task = await inner_session.get(Task, task_id)
-            if not inner_task:
-                await progress_queue.put({"type": "error", "error": "任务不存在"})
-                return
+        try:
+            # 在新任务中需要重新获取 session 和 task
+            async with async_session() as inner_session:
+                inner_task = await inner_session.get(Task, task_id)
+                if not inner_task:
+                    await progress_queue.put({"type": "error", "error": "任务不存在"})
+                    return
 
-            audio_results = await generate_audio_per_page(
-                valid_scripts, str(audio_dir), progress_callback, existing_audios
-            )
-            inner_task.slides_audio = slides_to_json(audio_results)
-            inner_task.status = "audio_ready"
-            await inner_session.commit()
-            await progress_queue.put({"type": "complete", "status": "audio_ready"})
+                audio_results = await generate_audio_per_page(
+                    valid_scripts, str(audio_dir), progress_callback, existing_audios
+                )
+                inner_task.slides_audio = slides_to_json(audio_results)
+                inner_task.status = "audio_ready"
+                await inner_session.commit()
+                await progress_queue.put({"type": "complete", "status": "audio_ready"})
+        except Exception as e:
+            logger.error(f"音频生成任务失败: {e}")
+            await progress_queue.put({"type": "error", "error": f"音频生成失败: {str(e)}"})
 
     # 并发执行：生成音频 + 发送进度
     generation_task = asyncio.create_task(run_generation())
@@ -730,31 +734,47 @@ async def upload_script(
     slide_count = len(slides)
     scripts = []
 
-    # 尝试解析 JSONL 格式
+    # 尝试解析 JSON 数组格式或 JSONL 格式
+    json_array_data = None
     is_jsonl = False
-    try:
-        lines = text_content.strip().split('\n')
-        jsonl_data = []
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-            obj = json.loads(line)
-            if "script" in obj:
-                jsonl_data.append(obj)
-        # 如果成功解析出有效数据，认为是 JSONL 格式
-        if jsonl_data and all("page" in obj or "page_num" in obj for obj in jsonl_data):
-            is_jsonl = True
-    except json.JSONDecodeError:
-        is_jsonl = False
 
-    if is_jsonl:
-        # JSONL 格式：按 page/page_num 字段匹配
+    # 首先尝试解析为 JSON 数组格式
+    try:
+        json_array_data = json.loads(text_content)
+        if isinstance(json_array_data, list) and len(json_array_data) > 0:
+            # 是 JSON 数组格式
+            json_array_data = [obj for obj in json_array_data if "page" in obj or "page_num" in obj]
+    except json.JSONDecodeError:
+        json_array_data = None
+
+    # 如果不是 JSON 数组格式，尝试 JSONL 格式
+    if not json_array_data:
+        try:
+            lines = text_content.strip().split('\n')
+            jsonl_data = []
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                obj = json.loads(line)
+                if "script" in obj:
+                    jsonl_data.append(obj)
+            # 如果成功解析出有效数据，认为是 JSONL 格式
+            if jsonl_data and all("page" in obj or "page_num" in obj for obj in jsonl_data):
+                is_jsonl = True
+                json_array_data = jsonl_data
+        except json.JSONDecodeError:
+            is_jsonl = False
+
+    # 使用 JSON 数组数据（无论是 JSON 数组还是 JSONL 格式）
+    if json_array_data:
+        is_jsonl = True
+        # JSON 数组或 JSONL 格式：按 page/page_num 字段匹配
         for i in range(slide_count):
             page_num = slides[i]["page_num"]
             # 查找对应的脚本
             script_obj = next(
-                (obj for obj in jsonl_data if obj.get("page") == page_num or obj.get("page_num") == page_num),
+                (obj for obj in json_array_data if obj.get("page") == page_num or obj.get("page_num") == page_num),
                 None
             )
             script_content = script_obj.get("script", "") if script_obj else ""
