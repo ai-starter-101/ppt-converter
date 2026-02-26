@@ -120,6 +120,11 @@ export const deleteTask = async (id: string): Promise<{ message: string; task_id
   return apiClient.delete(`/tasks/${id}`);
 };
 
+// 批量删除任务
+export const batchDeleteTasks = async (taskIds: string[]): Promise<{ message: string; deleted_count: number; deleted_ids: string[]; failed_ids: string[] }> => {
+  return apiClient.post('/tasks/batch-delete', { task_ids: taskIds });
+};
+
 // 合成视频（将音频插入PPT）
 export const synthesizeVideo = async (id: string): Promise<{ task_id: string; video_path: string; status: string }> => {
   return apiClient.post(`/tasks/${id}/video/synthesize`);

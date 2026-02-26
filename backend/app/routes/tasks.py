@@ -82,6 +82,24 @@ async def get_task(task_id: str, session: Session = Depends(get_session)) -> dic
     task = session.get(Task, task_id)
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
+
+    # 自动修复状态：如果音频已生成但状态不是 audio_ready，则修复
+    if task.status == "script_ready" and task.slides_audio:
+        try:
+            # 解析音频数据
+            if isinstance(task.slides_audio, str):
+                audios = parse_slides_json(task.slides_audio)
+            else:
+                audios = task.slides_audio
+            # 检查是否有有效的音频
+            valid_audios = [a for a in audios if a.get("audio_path")]
+            if len(valid_audios) >= task.slide_count:
+                task.status = "audio_ready"
+                session.commit()
+                print(f"自动修复任务状态: {task_id} -> audio_ready")
+        except Exception as e:
+            print(f"自动修复状态失败: {e}")
+
     return task.model_dump()
 
 
@@ -110,6 +128,12 @@ async def delete_task(task_id: str, session: Session = Depends(get_session)) -> 
             import shutil
             shutil.rmtree(audio_dir)
 
+        # 删除视频目录
+        video_dir = settings.static_dir / "video" / task_id
+        if video_dir.exists():
+            import shutil
+            shutil.rmtree(video_dir)
+
     except Exception as e:
         # 文件删除失败不影响任务删除
         print(f"警告: 删除文件失败: {e}")
@@ -119,6 +143,65 @@ async def delete_task(task_id: str, session: Session = Depends(get_session)) -> 
     session.commit()
 
     return {"message": "任务已删除", "task_id": task_id}
+
+
+@router.post("/batch-delete")
+async def batch_delete_tasks(request: dict, session: Session = Depends(get_session)) -> dict:
+    """批量删除任务"""
+    task_ids: List[str] = request.get("task_ids", [])
+    if not task_ids:
+        raise HTTPException(status_code=400, detail="任务ID列表为空")
+
+    # 获取要删除的任务
+    tasks = session.exec(select(Task).where(Task.id.in_(task_ids))).all()
+
+    deleted_ids = []
+    failed_ids = []
+
+    for task in tasks:
+        task_id = task.id
+        try:
+            # 删除关联的文件
+            try:
+                # 删除 PPT 文件
+                if task.file_path and Path(task.file_path).exists():
+                    Path(task.file_path).unlink()
+
+                # 删除截图目录
+                screenshot_dir = settings.static_dir / "screenshots" / task_id
+                if screenshot_dir.exists():
+                    import shutil
+                    shutil.rmtree(screenshot_dir)
+
+                # 删除音频目录
+                audio_dir = settings.audio_dir / task_id
+                if audio_dir.exists():
+                    import shutil
+                    shutil.rmtree(audio_dir)
+
+                # 删除视频目录
+                video_dir = settings.static_dir / "video" / task_id
+                if video_dir.exists():
+                    import shutil
+                    shutil.rmtree(video_dir)
+            except Exception as e:
+                print(f"警告: 删除任务 {task_id} 文件失败: {e}")
+
+            # 删除数据库记录
+            session.delete(task)
+            deleted_ids.append(task_id)
+        except Exception as e:
+            print(f"警告: 删除任务 {task_id} 失败: {e}")
+            failed_ids.append(task_id)
+
+    session.commit()
+
+    return {
+        "message": f"成功删除 {len(deleted_ids)} 个任务",
+        "deleted_count": len(deleted_ids),
+        "deleted_ids": deleted_ids,
+        "failed_ids": failed_ids
+    }
 
 
 @router.post("/{task_id}/upload")
@@ -199,8 +282,37 @@ async def get_slides(task_id: str, session: Session = Depends(get_session)) -> d
     audios = parse_slides_json(task.slides_audio)
     screenshots = parse_slides_json(task.slides_screenshots)
 
-    # 创建截图查找字典
-    screenshots_dict = {s["page_num"]: s["screenshot_path"] for s in screenshots}
+    # 创建截图查找字典（优先使用数据库中的路径，如果文件不存在则查找其他可能）
+    screenshots_dict = {}
+    screenshot_dir = settings.static_dir / "screenshots" / task_id
+
+    for s in screenshots:
+        page_num = s["page_num"]
+        saved_path = s.get("screenshot_path", "")
+
+        # 检查保存的路径是否有效
+        if saved_path:
+            full_path = settings.static_dir / saved_path.lstrip("/static/")
+            if full_path.exists():
+                screenshots_dict[page_num] = saved_path
+                continue
+
+        # 如果数据库中的路径无效，查找目录中的其他可能文件
+        if screenshot_dir.exists():
+            # 尝试多种可能的文件名格式
+            possible_names = [
+                f"page_{page_num}.png",
+                f"page_{page_num}.jpg",
+                f"page_{page_num}.jpeg",
+                f"{task_id}-{page_num:02d}.png",  # LibreOffice 格式
+                f"幻灯片{page_num}.png",
+                f"slide_{page_num}.png",
+            ]
+            for name in possible_names:
+                alt_path = screenshot_dir / name
+                if alt_path.exists():
+                    screenshots_dict[page_num] = f"/static/screenshots/{task_id}/{name}"
+                    break
 
     # 合并数据
     result = []
@@ -543,9 +655,13 @@ async def audio_generator_stream(task_id: str):
 
     # 在后台运行音频生成，同时读取队列发送进度
     async def run_generation():
+        # 使用独立的 session 确保状态更新能被提交
+        from app.database import async_session
+        from sqlmodel import select
+
         try:
-            # 在新任务中需要重新获取 session 和 task
             async with async_session() as inner_session:
+                # 重新查询任务确保是当前 session 的对象
                 inner_task = await inner_session.get(Task, task_id)
                 if not inner_task:
                     await progress_queue.put({"type": "error", "error": "任务不存在"})
@@ -557,9 +673,20 @@ async def audio_generator_stream(task_id: str):
                 inner_task.slides_audio = slides_to_json(audio_results)
                 inner_task.status = "audio_ready"
                 await inner_session.commit()
+
+                # 发送完成消息
                 await progress_queue.put({"type": "complete", "status": "audio_ready"})
         except Exception as e:
             logger.error(f"音频生成任务失败: {e}")
+            # 尝试更新任务状态为失败
+            try:
+                async with async_session() as error_session:
+                    error_task = await error_session.get(Task, task_id)
+                    if error_task and error_task.status != "audio_ready":
+                        error_task.status = "script_ready"  # 回退到脚本状态
+                        await error_session.commit()
+            except Exception as update_error:
+                logger.error(f"更新任务状态失败: {update_error}")
             await progress_queue.put({"type": "error", "error": f"音频生成失败: {str(e)}"})
 
     # 并发执行：生成音频 + 发送进度
@@ -649,6 +776,7 @@ async def upload_screenshots(
                 page_num = int(match.group(1))
 
         if page_num is None:
+            print(f"警告: 无法解析截图文件名 {filename} 的页码，跳过该文件")
             continue
 
         # 保存文件

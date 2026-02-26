@@ -3,8 +3,8 @@ import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Table, Button, Tag, Typography, Space, message, Modal, Layout, Pagination, Flex, Card } from 'antd';
-import { PlusOutlined, FileTextOutlined, ClockCircleOutlined, DeleteOutlined, FolderOpenOutlined, CheckCircleFilled, SyncOutlined, RightOutlined } from '@ant-design/icons';
-import { getTaskList, createTask, deleteTask } from '../../api/task';
+import { PlusOutlined, FileTextOutlined, ClockCircleOutlined, DeleteOutlined, FolderOpenOutlined, CheckCircleFilled, SyncOutlined, RightOutlined, DeleteTwoTone } from '@ant-design/icons';
+import { getTaskList, createTask, deleteTask, batchDeleteTasks } from '../../api/task';
 import type { Task, TaskStatus } from '../../types';
 import { useTaskStore } from '../../store/useTaskStore';
 
@@ -50,6 +50,7 @@ export const HomePage = () => {
   const queryClient = useQueryClient();
   const { setTasks, tasks } = useTaskStore();
   const [page, setPage] = useState(1);
+  const [selectedRowKeys, setSelectedRowKeys] = useState<string[]>([]);
   const pageSize = 10;
 
   // 获取任务列表
@@ -91,7 +92,9 @@ export const HomePage = () => {
     mutationFn: deleteTask,
     onSuccess: () => {
       message.success('任务已删除');
+      // 强制重新获取数据
       queryClient.invalidateQueries({ queryKey: ['tasks'] });
+      queryClient.refetchQueries({ queryKey: ['tasks'] });
     },
     onError: (error: Error) => {
       message.error(error.message || '删除失败');
@@ -107,6 +110,39 @@ export const HomePage = () => {
       cancelText: '取消',
       onOk: () => {
         deleteMutation.mutate(taskId);
+      },
+    });
+  };
+
+  // 批量删除 mutation
+  const batchDeleteMutation = useMutation({
+    mutationFn: batchDeleteTasks,
+    onSuccess: (data) => {
+      message.success(`成功删除 ${data.deleted_count} 个任务`);
+      setSelectedRowKeys([]);
+      // 强制重新获取数据
+      queryClient.invalidateQueries({ queryKey: ['tasks'] });
+      queryClient.refetchQueries({ queryKey: ['tasks'] });
+    },
+    onError: (error: Error) => {
+      message.error(error.message || '批量删除失败');
+    },
+  });
+
+  const handleBatchDelete = () => {
+    if (selectedRowKeys.length === 0) {
+      message.warning('请先选择要删除的任务');
+      return;
+    }
+
+    Modal.confirm({
+      title: '确认批量删除',
+      content: `确定要删除选中的 ${selectedRowKeys.length} 个任务吗？此操作不可恢复。`,
+      okText: '删除',
+      okType: 'danger',
+      cancelText: '取消',
+      onOk: () => {
+        batchDeleteMutation.mutate(selectedRowKeys);
       },
     });
   };
@@ -296,7 +332,19 @@ export const HomePage = () => {
           <Card style={{ marginBottom: 16, width: '100%' }}>
             <Flex justify="space-between" align="center" style={{ marginBottom: 16 }}>
               <Title level={5} style={{ margin: 0 }}>任务列表</Title>
-              <Text type="secondary">共 {tasks.length} 个任务</Text>
+              <Space>
+                {selectedRowKeys.length > 0 && (
+                  <Button
+                    danger
+                    icon={<DeleteTwoTone twoToneColor="#ff4d4f" />}
+                    onClick={handleBatchDelete}
+                    loading={batchDeleteMutation.isPending}
+                  >
+                    删除选中 ({selectedRowKeys.length})
+                  </Button>
+                )}
+                <Text type="secondary">共 {tasks.length} 个任务</Text>
+              </Space>
             </Flex>
 
             <Table
@@ -307,6 +355,10 @@ export const HomePage = () => {
               pagination={false}
               size="middle"
               scroll={{ x: true }}
+              rowSelection={{
+                selectedRowKeys,
+                onChange: (keys) => setSelectedRowKeys(keys as string[]),
+              }}
               onRow={(record) => ({
                 onClick: () => navigate(`/task/${record.id}`),
                 style: { cursor: 'pointer' },

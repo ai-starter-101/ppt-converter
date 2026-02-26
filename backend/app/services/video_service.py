@@ -1,5 +1,6 @@
 """视频合成服务 - 使用 FFmpeg 将 PPT 截图和音频合成为视频"""
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -64,7 +65,7 @@ def synthesize_video(task_id: str, ppt_path: str, audio_dir: str, screenshot_dir
         # 解析页码的辅助函数
         def extract_page_num(filename: str) -> int:
             import re
-            # 格式1: page_1.png, page_2.png
+            # 格式1: page_1.png, page_2.png (用户上传的截图)
             match = re.search(r'page_(\d+)', filename, re.IGNORECASE)
             if match:
                 return int(match.group(1))
@@ -80,6 +81,10 @@ def synthesize_video(task_id: str, ppt_path: str, audio_dir: str, screenshot_dir
             match = re.search(r'slide-(\d+)', filename, re.IGNORECASE)
             if match:
                 return int(match.group(1))
+            # 格式5: {uuid}-01.png (LibreOffice 生成的截图)
+            match = re.search(r'-(\d+)\.png$', filename)
+            if match:
+                return int(match.group(1))
             return 999999  # 未识别的放最后
 
         # 优先使用用户上传的截图
@@ -91,11 +96,29 @@ def synthesize_video(task_id: str, ppt_path: str, audio_dir: str, screenshot_dir
             for ext in ['*.png', '*.jpg', '*.jpeg', '*.gif']:
                 all_files.extend(Path(screenshot_dir).glob(ext))
 
-            # 按页码排序
-            sorted_files = sorted(all_files, key=lambda f: extract_page_num(f.name))
+            # 区分用户上传的截图和 LibreOffice 生成的截图
+            # 用户上传的格式: page_N.png
+            # LibreOffice 生成的格式: {uuid}-NN.png
+            user_uploaded_files = {}  # page_num -> file_path
+            libo_files = {}  # page_num -> file_path
 
-            for i, img_file in enumerate(sorted_files):
-                page_num = extract_page_num(img_file.name)
+            for f in all_files:
+                page_num = extract_page_num(f.name)
+                # 检查是否是用户上传的格式 (page_N.png)
+                if re.match(r'^page_\d+', f.name, re.IGNORECASE):
+                    user_uploaded_files[page_num] = f
+                else:
+                    # LibreOffice 生成的格式
+                    libo_files[page_num] = f
+
+            # 优先使用用户上传的截图，如果没有则使用 LibreOffice 生成的
+            all_page_nums = sorted(set(user_uploaded_files.keys()) | set(libo_files.keys()))
+            for page_num in all_page_nums:
+                if page_num in user_uploaded_files:
+                    img_file = user_uploaded_files[page_num]
+                else:
+                    img_file = libo_files[page_num]
+
                 dest_file = os.path.join(temp_img_dir, f"slide-{page_num}.png")
                 shutil.copy2(img_file, dest_file)
                 image_files.append(dest_file)
