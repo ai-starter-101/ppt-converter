@@ -2,6 +2,7 @@
 import uuid
 import json
 import asyncio
+import logging
 from pathlib import Path
 from typing import List, Optional, Callable
 from fastapi import APIRouter, HTTPException, UploadFile, File, Depends, Query
@@ -22,6 +23,7 @@ from app.config import settings
 import aiofiles
 
 router = APIRouter(prefix="/api/tasks", tags=["任务管理"])
+logger = logging.getLogger(__name__)
 
 # 存储进度回调 {task_id: (queue, cancel_event)}
 progress_stores: dict = {}
@@ -292,7 +294,8 @@ async def get_slides(task_id: str, session: Session = Depends(get_session)) -> d
 
         # 检查保存的路径是否有效
         if saved_path:
-            full_path = settings.static_dir / saved_path.lstrip("/static/")
+            normalized = saved_path.removeprefix("/static/").lstrip("/")
+            full_path = settings.static_dir / normalized
             if full_path.exists():
                 screenshots_dict[page_num] = saved_path
                 continue
@@ -304,6 +307,7 @@ async def get_slides(task_id: str, session: Session = Depends(get_session)) -> d
                 f"page_{page_num}.png",
                 f"page_{page_num}.jpg",
                 f"page_{page_num}.jpeg",
+                f"{task_id}-{page_num}.png",      # LibreOffice 常见格式
                 f"{task_id}-{page_num:02d}.png",  # LibreOffice 格式
                 f"幻灯片{page_num}.png",
                 f"slide_{page_num}.png",
@@ -598,7 +602,8 @@ async def generate_all_audio(
     audio_results = await generate_audio_per_page(valid_scripts, str(audio_dir), existing_audios=existing_audios)
 
     task.slides_audio = slides_to_json(audio_results)
-    task.status = "audio_ready"
+    valid_audios = [a for a in audio_results if a.get("audio_path")]
+    task.status = "audio_ready" if len(valid_audios) >= task.slide_count else "script_ready"
     session.commit()
 
     return {
@@ -676,11 +681,12 @@ async def audio_generator_stream(task_id: str):
                     valid_scripts, str(audio_dir), progress_callback, existing_audios
                 )
                 inner_task.slides_audio = slides_to_json(audio_results)
-                inner_task.status = "audio_ready"
+                valid_audios = [a for a in audio_results if a.get("audio_path")]
+                inner_task.status = "audio_ready" if len(valid_audios) >= inner_task.slide_count else "script_ready"
                 await inner_session.commit()
 
                 # 发送完成消息
-                await progress_queue.put({"type": "complete", "status": "audio_ready"})
+                await progress_queue.put({"type": "complete", "status": inner_task.status})
         except Exception as e:
             logger.error(f"音频生成任务失败: {e}")
             # 尝试更新任务状态为失败

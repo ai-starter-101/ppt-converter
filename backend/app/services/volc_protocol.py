@@ -234,7 +234,7 @@ class Message:
         buffer.write(struct.pack(">i", self.sequence))
 
     def _write_error_code(self, buffer: io.BytesIO) -> None:
-        buffer.write(struct.pack(">U", self.error_code))
+        buffer.write(struct.pack(">I", self.error_code))
 
     def _write_payload(self, buffer: io.BytesIO) -> None:
         size = len(self.payload)

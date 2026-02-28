@@ -10,7 +10,7 @@ import subprocess
 import time
 import urllib.parse
 from pathlib import Path
-from typing import List, Dict
+from typing import List, Dict, Optional
 import edge_tts
 import httpx
 from app.config import settings
@@ -548,11 +548,19 @@ async def generate_audio_per_page(
         audio_dir: 音频输出目录
         progress_callback: 进度回调函数，接收 (current, total, page_num) 参数
         existing_audios: 已有的音频信息列表，用于跳过已成功的页面
-        max_concurrent: 最大并发数，默认5路
+        max_concurrent: 最大并发数，默认3路
     """
     Path(audio_dir).mkdir(parents=True, exist_ok=True)
     results = []
     total = len(slides_script)
+
+    async def notify_progress(current: int, total_count: int, page_num: Optional[int]) -> None:
+        """兼容同步/异步两种进度回调。"""
+        if not progress_callback:
+            return
+        maybe_awaitable = progress_callback(current, total_count, page_num)
+        if asyncio.iscoroutine(maybe_awaitable):
+            await maybe_awaitable
 
     # 构建已成功的页面集合
     successful_pages: set = set()
@@ -567,8 +575,7 @@ async def generate_audio_per_page(
 
     if generate_total == 0:
         # 所有页面都已生成完成
-        if progress_callback:
-            progress_callback(total, total, None)
+        await notify_progress(total, total, None)
         return existing_audios or []
 
     # 添加已成功的结果到最终结果
@@ -591,8 +598,7 @@ async def generate_audio_per_page(
             nonlocal generated_count
             async with count_lock:
                 generated_count += 1
-                if progress_callback:
-                    progress_callback(generated_count, generate_total, page_num)
+                await notify_progress(generated_count, generate_total, page_num)
 
             if not script or script.strip() == "":
                 return {
@@ -627,8 +633,7 @@ async def generate_audio_per_page(
     results.sort(key=lambda x: x["page_num"])
 
     # 报告完成
-    if progress_callback:
-        progress_callback(generate_total, generate_total, None)
+    await notify_progress(generate_total, generate_total, None)
 
     return results
 
