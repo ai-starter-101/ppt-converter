@@ -159,8 +159,12 @@ async def _generate_xfyun_audio(text: str, output_path: str) -> float:
 
     return get_audio_duration(str(output_path))
 # 多音字词典 - TTS 容易读错的词
+# 注意：避免包含有重叠部分的词，如 "进行" 和 "行"
 HOMOPHONE_DICT = {
-    # 行 (háng vs xíng)
+    # 需要优先处理的词（放在前面）
+    "进行": "进形",
+    "举行": "举形",
+    # 行 (háng vs xíng) - 这些词必须完整匹配才替换
     "换行符": "换航符",
     "换行": "换航",
     "银行": "银航",
@@ -173,17 +177,17 @@ HOMOPHONE_DICT = {
     "行首": "航首",
     "行尾": "航尾",
     "行头": "航头",
-    "一行": "一航",
     "每行": "每航",
     "行内": "航内",
     "行间": "航间",
     "行与行": "航与航",
+    # 符号
     "C++": "C加加",
-    ">=":"大于等于",
-    "<=":"小于等于",
-    "==":"等于",
-    "&&":"与",
-    "||":"或"
+    ">=": "大于等于",
+    "<=": "小于等于",
+    "==": "等于",
+    "&&": "与",
+    "||": "或",
 }
 
 
@@ -192,8 +196,7 @@ def fix_homophones(text: str) -> str:
     if not text:
         return text
 
-    for wrong, correct in HOMOPHONE_DICT.items():
-        text = text.replace(wrong, correct)
+    original_text = text
 
     # 修复数字+横杠+数字的问题，如 "1-1" 读成 "11"
     # 模式：数字/字母 + - + 数字/字母
@@ -206,12 +209,10 @@ def fix_homophones(text: str) -> str:
     # 匹配形如 "1-1"、"A-1"、"2024-01"、"v1-2" 等
     text = re.sub(r'([A-Za-z0-9]+)-([A-Za-z0-9]+)', replace_dash, text)
 
-    # 修复 "行+数字" → "航+数字"（如行6 → 航6）
-    text = re.sub(r'行(\d+)', r'航\1', text)
-
-    # 修复 "行+中文数字" → "航+中文数字"（如行一 → 航一）
-    chinese_nums = '一二三四五六七八九十百千万亿'
-    text = re.sub(r'行([' + chinese_nums + ']+)', r'航\1', text)
+    # 执行多音字替换 - 使用更安全的方式：按长度降序排列，先处理长的词
+    sorted_items = sorted(HOMOPHONE_DICT.items(), key=lambda x: len(x[0]), reverse=True)
+    for wrong, correct in sorted_items:
+        text = text.replace(wrong, correct)
 
     return text
 
@@ -335,12 +336,13 @@ async def _generate_doubao_bidir_audio(text: str, output_path: str) -> float:
 
     logger.info(f"Connecting to Volcano TTS: {endpoint}")
     logger.info(f"Headers: appid={settings.doubao_app_id[:8] if settings.doubao_app_id else 'None'}...")
+    logger.info(f"TTS params: speech_rate={settings.tts_speed}, loudness_rate={settings.tts_volume}, pitch={settings.tts_pitch}")
 
     try:
         # 30秒超时连接
         async with websockets.connect(
             endpoint, additional_headers=headers, max_size=10 * 1024 * 1024,
-            open_timeout=30, close_timeout=10
+            open_timeout=60, close_timeout=30
         ) as websocket:
             logid = websocket.response.headers.get('x-tt-logid', 'unknown')
             logger.info(f"Connected to Volcano TTS, logid: {logid}")
@@ -351,27 +353,62 @@ async def _generate_doubao_bidir_audio(text: str, output_path: str) -> float:
                 timeout=10
             )
 
-            # 2. 分割文本为句子
-            sentences = [s.strip() + "。" for s in text.split("。") if s.strip()]
-            if not sentences:
-                sentences = [text]
+            # 2. 分割文本为句子（支持多种标点符号）
+            import re
+            # 按句号、问号、感叹号分割（保留原始标点在句子末尾）
+            sentences = re.split(r'([。？！])', text)
+            # 重新组合句子和标点
+            result = []
+            i = 0
+            while i < len(sentences):
+                s = sentences[i].strip()
+                if s:
+                    # 如果下一项是标点，添加到句子末尾
+                    if i + 1 < len(sentences) and sentences[i + 1] in '。？！':
+                        s += sentences[i + 1]
+                        i += 1
+                    result.append(s)
+                i += 1
+            if not result:
+                result = [text]
+            sentences = result
 
             audio_data = bytearray()
 
             # 3. 会话基础请求
+            audio_params = {
+                "format": "mp3",
+                "sample_rate": 24000,
+                "enable_timestamp": True,
+            }
+
+            # 添加语速、音量参数到 audio_params（豆包2.0）
+            # speech_rate: [-50, 100], 0=标准速度, 100=2倍速, -50=0.5倍速
+            # loudness_rate: [-50, 100], 0=标准音量, 100=2倍音量, -50=0.5倍音量
+            if settings.tts_speed:
+                audio_params["speech_rate"] = int(settings.tts_speed)
+            if settings.tts_volume:
+                audio_params["loudness_rate"] = int(settings.tts_volume)
+
+            # 添加音调参数到 additions.post_process（豆包2.0）
+            # pitch: [-12, 12], 0=标准音调
+            additions = {"disable_markdown_filter": False}
+            if settings.tts_pitch:
+                additions["post_process"] = {"pitch": int(settings.tts_pitch)}
+
+            req_params = {
+                "speaker": voice_type,
+                "audio_params": audio_params,
+                "additions": json.dumps(additions),
+            }
+
             base_request = {
                 "user": {"uid": settings.doubao_app_id},
                 "namespace": "BidirectionalTTS",
-                "req_params": {
-                    "speaker": voice_type,
-                    "audio_params": {
-                        "format": "mp3",
-                        "sample_rate": 24000,
-                        "enable_timestamp": True,
-                    },
-                    "additions": json.dumps({"disable_markdown_filter": False}),
-                },
+                "req_params": req_params,
             }
+
+            logger.info(f"Full req_params: {json.dumps(req_params, ensure_ascii=False)[:500]}")
 
             # 4. 处理每个句子
             for i, sentence in enumerate(sentences):
@@ -401,7 +438,7 @@ async def _generate_doubao_bidir_audio(text: str, output_path: str) -> float:
                 # 4.4 接收音频数据 - 30秒超时
                 msg_count = 0
                 while True:
-                    msg = await asyncio.wait_for(receive_message(websocket), timeout=30)
+                    msg = await asyncio.wait_for(receive_message(websocket), timeout=60)
                     msg_count += 1
 
                     if msg.type == MsgType.FullServerResponse:

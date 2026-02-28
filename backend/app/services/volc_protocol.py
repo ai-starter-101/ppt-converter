@@ -244,7 +244,13 @@ class Message:
     def _read_event(self, buffer: io.BytesIO) -> None:
         event_bytes = buffer.read(4)
         if event_bytes:
-            self.event = EventType(struct.unpack(">i", event_bytes)[0])
+            event_value = struct.unpack(">i", event_bytes)[0]
+            try:
+                self.event = EventType(event_value)
+            except ValueError:
+                # 未知事件类型，记录日志并设置为 None_
+                logger.debug(f"Unknown event type: {event_value}, setting to None_")
+                self.event = EventType.None_
 
     def _read_session_id(self, buffer: io.BytesIO) -> None:
         if self.event in [EventType.StartConnection, EventType.FinishConnection,

@@ -30,6 +30,14 @@ class Settings:
     tts_voice: str = os.getenv("TTS_VOICE", "zh-CN-XiaoxiaoNeural")
     tts_proxy: str = os.getenv("TTS_PROXY", "")  # Edge TTS 代理
 
+    # TTS 音色参数 (豆包2.0)
+    # speech_rate: 语速，取值范围[-50,100]，0=标准速度，100=2倍速，-50=0.5倍速
+    # loudness_rate: 音量，取值范围[-50,100]，0=标准音量，100=2倍音量，-50=0.5倍音量
+    # pitch: 音调，取值范围[-12,12]，0=标准音调
+    tts_speed: str = os.getenv("TTS_SPEED", "")    # 语速，如 "0"（标准），"50"（1.5倍），"-25"（0.75倍）
+    tts_volume: str = os.getenv("TTS_VOLUME", "")  # 音量，如 "0"（标准），"50"（1.5倍），"-25"（0.75倍）
+    tts_pitch: str = os.getenv("TTS_PITCH", "")    # 音调，如 "0"（标准），"-6"（低6度），"6"（高6度）
+
     # 讯飞 TTS 配置
     xfyun_app_id: str = os.getenv("XFYUN_APP_ID", "")
     xfyun_api_key: str = os.getenv("XFYUN_API_KEY", "")

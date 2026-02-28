@@ -742,7 +742,7 @@ const SlideCard = ({ taskId, slide, onUpdate }: { taskId: string; slide: SlideDa
         <div style={{ flex: 1, overflow: 'auto', background: '#f5f5f5', borderRadius: 8, padding: 12 }}>
           {slide.screenshot ? (
             <img
-              src={slide.screenshot}
+              src={`${slide.screenshot}?t=${Date.now()}`}
               alt={`第 ${slide.page_num} 页`}
               style={{
                 width: '100%',

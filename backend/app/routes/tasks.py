@@ -508,7 +508,12 @@ async def generate_audio_page(
         })
 
     task.slides_audio = slides_to_json(audios)
-    task.status = "audio_ready"
+
+    # 检查是否所有页的音频都已生成
+    valid_audios = [a for a in audios if a.get("audio_path")]
+    if len(valid_audios) >= task.slide_count:
+        task.status = "audio_ready"
+
     session.commit()
 
     return {
